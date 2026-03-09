@@ -12,7 +12,7 @@
       "name": "devproxy",
       "source": "./",
       "description": "Skills for setting up and using devproxy — local HTTPS dev subdomains for Docker Compose projects",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "author": {
         "name": "Foundra"
       },
