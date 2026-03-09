@@ -17,9 +17,11 @@ This is the simplest possible approach: the app name is baked into the compose p
 **App name detection:** A new function `detect_app_name(dir: &Path) -> Result<String>` in `config.rs`:
 1. Run `git -C {dir} remote get-url origin` and parse the repo name from the URL (handles both HTTPS and SSH formats). Strip `.git` suffix if present.
 2. If git fails or there's no remote, fall back to the directory name.
-3. Sanitize the result: lowercase, replace non-alphanumeric chars with hyphens, collapse consecutive hyphens, trim leading/trailing hyphens. Truncate so the total `{slug}-{appname}` stays within the 63-char DNS label limit.
+3. Sanitize the result: lowercase, replace non-alphanumeric chars with hyphens, collapse consecutive hyphens, trim leading/trailing hyphens. No truncation at this stage — truncation happens when composing the full slug.
 
-**Compose project name:** Currently `up.rs` generates a random slug (e.g., `swift-penguin`) and uses it as `--project-name`. The new behavior generates the composite `{slug}-{app-name}` (e.g., `swift-penguin-devproxy`) and uses that as `--project-name`. The `.devproxy-project` file stores this composite name. The daemon reads `com.docker.compose.project` which already equals this composite name — no daemon changes needed.
+**Composite slug and DNS label limit:** A new function `compose_slug(random_slug: &str, app_name: &str) -> String` in `config.rs` joins them as `{random_slug}-{app_name}` and then truncates the result to 63 characters (the RFC 1035 DNS label limit), trimming any trailing hyphen that the truncation might produce. The longest random slug is `bright-penguin` (14 chars); typical app names are short (e.g., `devproxy` = 8 chars, composite = 23 chars). Truncation only fires for unusually long app names.
+
+**Compose project name:** Currently `up.rs` generates a random slug (e.g., `swift-penguin`) and uses it as `--project-name`. The new behavior calls `compose_slug(&random_slug, &app_name)` to form the composite (e.g., `swift-penguin-devproxy`) and uses that as `--project-name`. The `.devproxy-project` file stores this composite name. The daemon reads `com.docker.compose.project` which already equals this composite name — no daemon changes needed.
 
 **`.devproxy-project` file:** No format change needed. The file continues to store the compose project name (now the composite `{slug}-{app-name}`). The `read_project_file` and `write_project_file` signatures remain the same.
 
@@ -130,10 +132,30 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_subdomain_truncates_long_names() {
+    fn sanitize_subdomain_does_not_truncate() {
         let long_name = "a".repeat(100);
         let result = sanitize_subdomain(&long_name);
-        assert!(result.len() <= 63);
+        assert_eq!(result.len(), 100, "sanitize_subdomain should not truncate");
+    }
+
+    #[test]
+    fn compose_slug_basic() {
+        assert_eq!(compose_slug("swift-penguin", "devproxy"), "swift-penguin-devproxy");
+    }
+
+    #[test]
+    fn compose_slug_truncates_to_63_chars() {
+        let long_app = "a".repeat(100);
+        let result = compose_slug("swift-penguin", &long_app);
+        assert!(result.len() <= 63, "composite slug must fit in a DNS label: len={}", result.len());
+        assert!(!result.ends_with('-'), "should not end with hyphen after truncation");
+        assert!(result.starts_with("swift-penguin-"), "should preserve the random slug prefix");
+    }
+
+    #[test]
+    fn compose_slug_normal_lengths_not_truncated() {
+        let result = compose_slug("bold-fox", "my-cool-app");
+        assert_eq!(result, "bold-fox-my-cool-app");
     }
 }
 ```
@@ -188,24 +210,30 @@ fn extract_repo_name(url: &str) -> Option<String> {
 
 /// Sanitize a string for use as part of a DNS subdomain label:
 /// lowercase, replace non-alphanumeric with hyphens, collapse consecutive hyphens,
-/// trim leading/trailing hyphens, truncate to 63 chars.
+/// trim leading/trailing hyphens. Does NOT truncate — callers that need length
+/// enforcement should use `compose_slug` which truncates the composite result.
 fn sanitize_subdomain(s: &str) -> String {
     let lower = s.to_lowercase();
     let replaced: String = lower
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let collapsed = replaced
+    replaced
         .split('-')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join("-");
-    let truncated = if collapsed.len() > 63 {
-        &collapsed[..63]
-    } else {
-        &collapsed
-    };
-    truncated.trim_end_matches('-').to_string()
+        .join("-")
+}
+
+/// Compose a DNS-safe slug from a random slug and app name.
+/// Joins as `{random_slug}-{app_name}` and truncates the result to 63 characters
+/// (the RFC 1035 DNS label limit), trimming any trailing hyphen.
+pub fn compose_slug(random_slug: &str, app_name: &str) -> String {
+    let composite = format!("{random_slug}-{app_name}");
+    if composite.len() <= 63 {
+        return composite;
+    }
+    composite[..63].trim_end_matches('-').to_string()
 }
 ```
 
@@ -234,7 +262,7 @@ let app_name = config::detect_app_name(&cwd)?;
 eprintln!("app: {}", app_name.cyan());
 
 let random_slug = slugs::generate_slug();
-let slug = format!("{random_slug}-{app_name}");
+let slug = config::compose_slug(&random_slug, &app_name);
 eprintln!("slug: {}", slug.cyan());
 ```
 
