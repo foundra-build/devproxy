@@ -79,6 +79,12 @@ pub async fn run_daemon(port: u16) -> Result<()> {
 
     let ipc_listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("could not bind IPC socket at {}", socket_path.display()))?;
+    // Make socket world-writable so non-root users can connect when daemon runs as root
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o777))?;
+    }
     // Ensure the socket file is removed when the daemon exits (normal or error).
     let _socket_guard = SocketCleanupGuard { path: socket_path.clone() };
     eprintln!("IPC listening on {}", socket_path.display());
