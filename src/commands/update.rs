@@ -142,7 +142,7 @@ pub(crate) fn prepare_binary(path: &Path) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .context("failed to set permissions on downloaded binary")?;
+            .context("failed to set binary permissions")?;
     }
 
     #[cfg(target_os = "macos")]
