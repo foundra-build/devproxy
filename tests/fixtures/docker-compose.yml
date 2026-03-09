@@ -1,0 +1,5 @@
+services:
+  web:
+    build: .
+    labels:
+      - "devproxy.port=3000"
