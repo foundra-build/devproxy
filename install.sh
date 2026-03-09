@@ -91,6 +91,12 @@ download_binary() {
         echo "Error: failed to set executable permissions on ${DEVPROXY_INSTALL_DIR}/devproxy" >&2
         exit 1
     fi
+    # On macOS, clear quarantine attributes and ad-hoc sign the binary
+    # to prevent Gatekeeper from killing it on first run.
+    if [ "$(uname -s)" = "Darwin" ]; then
+        xattr -cr "${DEVPROXY_INSTALL_DIR}/devproxy"
+        codesign --force --sign - "${DEVPROXY_INSTALL_DIR}/devproxy"
+    fi
     rm -f "$TMPFILE"
     trap - EXIT
 }

@@ -3,7 +3,8 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "devproxy",
-    about = "Local HTTPS dev subdomains for Docker Compose"
+    about = "Local HTTPS dev subdomains for Docker Compose",
+    version = env!("CARGO_PKG_VERSION")
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -34,6 +35,8 @@ pub enum Commands {
     Open,
     /// Show daemon health and active route count
     Status,
+    /// Check for updates and self-update the binary
+    Update,
     /// Run the proxy daemon (internal, hidden)
     #[command(hide = true)]
     Daemon {

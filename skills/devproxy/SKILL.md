@@ -24,6 +24,12 @@ Local HTTPS dev subdomains for Docker Compose projects. Single Rust binary — n
 curl -fsSL https://raw.githubusercontent.com/foundra-build/devproxy/main/install.sh | sh
 ```
 
+To update an existing installation:
+
+```bash
+devproxy update
+```
+
 ### 2. One-time init
 
 ```bash
@@ -86,6 +92,8 @@ devproxy open     # opens URL in browser
 | `devproxy down`                  | `docker compose down` + remove override file    |
 | `devproxy ls`                    | List running projects with slugs and URLs       |
 | `devproxy open`                  | Open this project's URL in browser              |
+| `devproxy update`                | Check for updates and self-update the binary    |
+| `devproxy --version`             | Show installed version                          |
 | `devproxy status`                | Daemon health + active route count              |
 
 ## How It Works (For Debugging)
@@ -106,3 +114,4 @@ devproxy open     # opens URL in browser
 | DNS not resolving `*.mysite.dev` | Add `127.0.0.1 slug.mysite.dev` to `/etc/hosts` or configure dnsmasq |
 | `.devproxy-override.yml` in git | Add it to `.gitignore` |
 | Slug changed after restart | Slugs are random per `devproxy up`. Pin not yet supported |
+| Binary "killed" (exit code 137) on macOS | Gatekeeper quarantine. Re-run the install script or run: `xattr -cr $(which devproxy) && codesign --force --sign - $(which devproxy)` |

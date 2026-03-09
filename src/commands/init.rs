@@ -31,7 +31,7 @@ fn validate_domain(domain: &str) -> Result<()> {
 /// Check whether the process at `pid` is a devproxy process by inspecting
 /// its command line. Returns false if we cannot determine (e.g., process
 /// belongs to another user) -- we err on the side of not killing.
-fn is_devproxy_process(pid: i32) -> bool {
+pub fn is_devproxy_process(pid: i32) -> bool {
     #[cfg(target_os = "macos")]
     {
         // On macOS, use `ps -p <pid> -o comm=` to get the process name.
@@ -79,7 +79,7 @@ fn is_devproxy_process(pid: i32) -> bool {
 /// a large range and the window is microseconds. The process-name check makes
 /// accidental kills vanishingly improbable -- the recycled PID would also need
 /// to be named "devproxy".
-fn kill_stale_daemon() -> Result<()> {
+pub fn kill_stale_daemon() -> Result<()> {
     let pid_path = Config::pid_path()?;
     let socket_path = Config::socket_path()?;
 
