@@ -91,14 +91,19 @@ fn kill_stale_daemon() -> Result<()> {
 
     if pid_path.exists() {
         let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
-        if let Ok(pid_u32) = pid_str.trim().parse::<u32>() {
-            // PID 0 is not valid -- it would signal the entire process group
-            // via libc::kill. The daemon writes its PID as u32 (from
-            // std::process::id()), so 0 is the only non-positive case.
-            let pid = pid_u32 as i32;
-            if pid <= 0 {
+        let trimmed = pid_str.trim();
+        if trimmed.is_empty() {
+            eprintln!(
+                "{} PID file is empty, cleaning up stale files",
+                "warn:".yellow()
+            );
+        } else if let Ok(pid_u32) = trimmed.parse::<u32>() {
+            // PID 0 would signal the entire process group via libc::kill,
+            // and values > i32::MAX would wrap negative when cast to i32
+            // (which libc::kill interprets as a process group ID).
+            if pid_u32 == 0 || pid_u32 > i32::MAX as u32 {
                 eprintln!(
-                    "{} invalid PID {pid} in PID file, cleaning up stale files",
+                    "{} invalid PID {pid_u32} in PID file, cleaning up stale files",
                     "warn:".yellow()
                 );
                 let _ = std::fs::remove_file(&pid_path);
@@ -107,6 +112,7 @@ fn kill_stale_daemon() -> Result<()> {
                 }
                 return Ok(());
             }
+            let pid = pid_u32 as i32;
 
             // Check if process is alive. kill(pid, 0) returns:
             //   0    — process exists and we can signal it
@@ -179,6 +185,12 @@ fn kill_stale_daemon() -> Result<()> {
                 );
             }
             // else: process does not exist (ESRCH) -- fall through to file cleanup
+        } else {
+            eprintln!(
+                "{} PID file contains unparseable content '{}', cleaning up stale files",
+                "warn:".yellow(),
+                trimmed,
+            );
         }
         let _ = std::fs::remove_file(&pid_path);
     }
@@ -339,9 +351,13 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         }
 
         // Capture daemon stderr to a log file for debugging startup failures.
+        // Append mode preserves the previous daemon's log for post-mortem debugging.
         let daemon_log_path = Config::daemon_log_path()?;
-        let daemon_log_file = std::fs::File::create(&daemon_log_path)
-            .with_context(|| format!("could not create daemon log at {}", daemon_log_path.display()))?;
+        let daemon_log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&daemon_log_path)
+            .with_context(|| format!("could not open daemon log at {}", daemon_log_path.display()))?;
 
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -439,8 +455,7 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     // Project setup
     eprintln!("  {} Add a devproxy.port label to your docker-compose.yml", format!("{step}.").bold());
     eprintln!();
-    step += 1;
-    eprintln!("  {} Run: devproxy up", format!("{step}.").bold());
+    eprintln!("  {} Run: devproxy up", format!("{}.", step + 1).bold());
 
     Ok(())
 }
