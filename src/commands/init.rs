@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::proxy::cert;
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
+use std::time::Duration;
 
 /// Validate that the domain looks reasonable: non-empty, contains only valid
 /// DNS characters, has at least one dot, and each label is 1-63 chars.
@@ -30,6 +31,69 @@ fn validate_domain(domain: &str) -> Result<()> {
     Ok(())
 }
 
+/// Kill a stale daemon process. Reads PID from the PID file, sends SIGTERM,
+/// then SIGKILL if needed. Also removes stale socket and PID files.
+fn kill_stale_daemon() -> Result<()> {
+    let pid_path = Config::pid_path()?;
+    let socket_path = Config::socket_path()?;
+
+    if pid_path.exists() {
+        let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            // Check if process is alive
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if alive {
+                eprintln!(
+                    "{} killing stale daemon (pid: {pid})...",
+                    "info:".cyan()
+                );
+                // Send SIGTERM first
+                unsafe { libc::kill(pid, libc::SIGTERM); }
+                // Wait briefly for graceful shutdown
+                std::thread::sleep(Duration::from_millis(500));
+                // Check if still alive, send SIGKILL
+                if unsafe { libc::kill(pid, 0) } == 0 {
+                    unsafe { libc::kill(pid, libc::SIGKILL); }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                eprintln!("{} stale daemon killed", "ok:".green());
+            }
+        }
+        let _ = std::fs::remove_file(&pid_path);
+    }
+
+    // Clean up stale socket
+    if socket_path.exists() {
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    Ok(())
+}
+
+/// Wait for the daemon to become responsive by polling the IPC socket.
+/// Returns Ok(()) if the daemon responds to a ping within the timeout,
+/// or an error if it doesn't.
+fn wait_for_daemon(timeout: Duration) -> Result<()> {
+    let socket_path = Config::socket_path()?;
+    let start = std::time::Instant::now();
+    let poll_interval = Duration::from_millis(100);
+
+    while start.elapsed() < timeout {
+        if socket_path.exists()
+            && std::os::unix::net::UnixStream::connect(&socket_path).is_ok()
+        {
+            // Socket is connectable -- daemon is likely alive
+            return Ok(());
+        }
+        std::thread::sleep(poll_interval);
+    }
+
+    bail!(
+        "daemon did not start within {}s. Check if port is available and you have permissions.",
+        timeout.as_secs()
+    )
+}
+
 pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     validate_domain(domain)?;
     let config = Config { domain: domain.to_string() };
@@ -52,7 +116,7 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         eprintln!("{} CA certificate generated", "ok:".green());
 
         // Trust the CA
-        eprintln!("trusting CA in system keychain (may require sudo)...");
+        eprintln!("trusting CA in system keychain (requires sudo)...");
         match cert::trust_ca_in_system(&ca_cert_path) {
             Ok(()) => eprintln!("{} CA trusted in system keychain", "ok:".green()),
             Err(e) => {
@@ -61,8 +125,17 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
                     "warn:".yellow()
                 );
                 eprintln!(
-                    "  manually trust: {}",
-                    ca_cert_path.display().to_string().cyan()
+                    "  run manually with sudo:"
+                );
+                #[cfg(target_os = "macos")]
+                eprintln!(
+                    "    sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+                    ca_cert_path.display()
+                );
+                #[cfg(target_os = "linux")]
+                eprintln!(
+                    "    sudo cp {} /usr/local/share/ca-certificates/devproxy-ca.crt && sudo update-ca-certificates",
+                    ca_cert_path.display()
                 );
             }
         }
@@ -107,10 +180,20 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     if no_daemon {
         eprintln!("{} daemon spawn skipped (--no-daemon)", "ok:".green());
     } else {
+        // Kill any stale daemon from a previous init
+        kill_stale_daemon()?;
+
+        if port < 1024 {
+            eprintln!(
+                "{} port {port} requires root privileges (sudo)",
+                "info:".cyan()
+            );
+        }
+
         eprintln!("starting daemon on port {port}...");
         let exe = std::env::current_exe().context("could not determine binary path")?;
 
-        let mut cmd = std::process::Command::new(exe);
+        let mut cmd = std::process::Command::new(&exe);
         cmd.args(["daemon", "--port", &port.to_string()]);
 
         // Forward DEVPROXY_CONFIG_DIR so the daemon uses the same config dir
@@ -139,18 +222,84 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         // Spawn a thread to reap the child so it does not become a zombie.
         // After setsid(), the child won't receive signals when the parent exits.
         std::thread::spawn(move || { let _ = child.wait(); });
-        eprintln!("{} daemon started (pid: {})", "ok:".green(), pid);
+
+        // Wait for daemon to become responsive (or fail fast)
+        match wait_for_daemon(Duration::from_secs(5)) {
+            Ok(()) => {
+                eprintln!("{} daemon started (pid: {pid})", "ok:".green());
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} daemon failed to start: {e}",
+                    "error:".red()
+                );
+                if port < 1024 {
+                    eprintln!(
+                        "  {} port {port} requires root. Try: sudo devproxy init --domain {domain}",
+                        "hint:".yellow()
+                    );
+                }
+                bail!("daemon failed to start. See error above.");
+            }
+        }
     }
 
     eprintln!();
     eprintln!("{}", "Setup complete!".green().bold());
     eprintln!();
     eprintln!("Next steps:");
-    eprintln!("  1. Set up wildcard DNS for *.{domain} -> 127.0.0.1");
-    eprintln!("     macOS: brew install dnsmasq");
-    eprintln!("     Quick: echo 'address=/.{domain}/127.0.0.1' >> /opt/homebrew/etc/dnsmasq.conf");
-    eprintln!("  2. Add a devproxy.port label to your docker-compose.yml");
-    eprintln!("  3. Run: devproxy up");
+    eprintln!();
+
+    // DNS setup instructions
+    eprintln!("  {} Set up wildcard DNS for *.{domain} -> 127.0.0.1", "1.".bold());
+    #[cfg(target_os = "macos")]
+    {
+        eprintln!();
+        eprintln!("     Install dnsmasq (if not already installed):");
+        eprintln!("       brew install dnsmasq");
+        eprintln!("       sudo brew services start dnsmasq");
+        eprintln!();
+        eprintln!("     Add wildcard DNS rule:");
+        eprintln!("       echo 'address=/.{domain}/127.0.0.1' >> $(brew --prefix)/etc/dnsmasq.conf");
+        eprintln!("       sudo brew services restart dnsmasq");
+        eprintln!();
+        // Extract the TLD for the resolver
+        let tld = domain.rsplit('.').next().unwrap_or(domain);
+        eprintln!("     Create resolver for .{tld} domains:");
+        eprintln!("       sudo mkdir -p /etc/resolver");
+        eprintln!("       echo 'nameserver 127.0.0.1' | sudo tee /etc/resolver/{tld}");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!("     Example: echo 'address=/.{domain}/127.0.0.1' >> /etc/dnsmasq.conf");
+    }
+    eprintln!();
+
+    // CA trust reminder
+    eprintln!("  {} Trust the CA certificate (if not done above)", "2.".bold());
+    eprintln!("     CA cert: {}", ca_cert_path.display().to_string().cyan());
+    #[cfg(target_os = "macos")]
+    eprintln!(
+        "     sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+        ca_cert_path.display()
+    );
+    eprintln!();
+
+    // Project setup
+    eprintln!("  {} Add a devproxy.port label to your docker-compose.yml", "3.".bold());
+    eprintln!();
+    eprintln!("  {} Run: devproxy up", "4.".bold());
+
+    if port == 443 && !no_daemon {
+        eprintln!();
+        eprintln!(
+            "  {} The daemon is listening on port 443 which requires sudo.",
+            "note:".yellow()
+        );
+        eprintln!(
+            "  If the daemon failed to bind, re-run: sudo devproxy init --domain {domain}"
+        );
+    }
 
     Ok(())
 }

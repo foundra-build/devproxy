@@ -49,6 +49,10 @@ impl Config {
         Ok(Self::config_dir()?.join("tls-key.pem"))
     }
 
+    pub fn pid_path() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("daemon.pid"))
+    }
+
     pub fn save(&self) -> Result<()> {
         let dir = Self::config_dir()?;
         std::fs::create_dir_all(&dir)?;

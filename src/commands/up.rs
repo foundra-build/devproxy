@@ -46,7 +46,8 @@ pub fn run() -> Result<()> {
     // Write project file (slug tracking -- used by `down` and `open`)
     config::write_project_file(compose_dir, &slug)?;
 
-    // Verify daemon is running before starting containers
+    // Verify daemon is running before starting containers.
+    // Use a short timeout (2s) so we fail fast instead of hanging forever.
     let socket_path = Config::socket_path()?;
     if !socket_path.exists() {
         // Clean up files we already wrote
@@ -54,13 +55,30 @@ pub fn run() -> Result<()> {
         let _ = std::fs::remove_file(compose_dir.join(".devproxy-project"));
         bail!("daemon is not running (no socket at {}). Run `devproxy init` first.", socket_path.display());
     }
-    if std::os::unix::net::UnixStream::connect(&socket_path).is_err() {
-        let _ = std::fs::remove_file(&override_path);
-        let _ = std::fs::remove_file(compose_dir.join(".devproxy-project"));
-        bail!(
-            "daemon is not running (could not connect to {}). Run `devproxy init` first.",
-            socket_path.display()
-        );
+
+    // Set a connect timeout to avoid hanging on a stale socket where
+    // the daemon process is dead but the socket file still exists.
+    let connect_timeout = std::time::Duration::from_secs(2);
+    let connect_result = std::os::unix::net::UnixStream::connect(&socket_path)
+        .and_then(|stream| {
+            stream.set_read_timeout(Some(connect_timeout))?;
+            stream.set_write_timeout(Some(connect_timeout))?;
+            Ok(stream)
+        });
+
+    match connect_result {
+        Ok(_stream) => {
+            // Connection succeeded -- daemon is alive
+            drop(_stream);
+        }
+        Err(_) => {
+            let _ = std::fs::remove_file(&override_path);
+            let _ = std::fs::remove_file(compose_dir.join(".devproxy-project"));
+            bail!(
+                "daemon is not running (could not connect to {}). Run `devproxy init` first.",
+                socket_path.display()
+            );
+        }
     }
 
     // Run docker compose up

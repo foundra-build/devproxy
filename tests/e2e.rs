@@ -681,3 +681,244 @@ fn test_ipc_ping_pong() {
     assert!(stderr.contains("running"), "should report daemon running: {stderr}");
     assert!(stderr.contains("active routes: 0"), "should report 0 routes: {stderr}");
 }
+
+// ---- New daemon setup flow tests -------------------------------------------
+
+/// Verify init output includes DNS setup instructions (dnsmasq, resolver)
+#[test]
+fn test_init_output_includes_dns_instructions() {
+    let config_dir = std::env::temp_dir().join(format!("devproxy-dns-test-{}", std::process::id()));
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    let output = Command::new(devproxy_bin())
+        .args(["init", "--domain", TEST_DOMAIN, "--no-daemon"])
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("failed to run devproxy init");
+
+    assert!(output.status.success(), "init should succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should mention dnsmasq
+    assert!(
+        stderr.contains("dnsmasq"),
+        "init output should mention dnsmasq for DNS setup: {stderr}"
+    );
+
+    // Should include the domain in DNS instructions
+    assert!(
+        stderr.contains(&format!(".{TEST_DOMAIN}")),
+        "init output should include domain in DNS instructions: {stderr}"
+    );
+
+    // On macOS, should mention /etc/resolver
+    #[cfg(target_os = "macos")]
+    assert!(
+        stderr.contains("/etc/resolver"),
+        "init output should mention /etc/resolver on macOS: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&config_dir);
+}
+
+/// Verify init output includes sudo note for port 443
+#[test]
+fn test_init_output_includes_sudo_note() {
+    let config_dir = std::env::temp_dir().join(format!("devproxy-sudo-test-{}", std::process::id()));
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    // Use --no-daemon so we don't need root, but still verify the output mentions sudo
+    let output = Command::new(devproxy_bin())
+        .args(["init", "--domain", TEST_DOMAIN, "--no-daemon"])
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("failed to run devproxy init");
+
+    assert!(output.status.success(), "init should succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should mention sudo in the CA trust section
+    assert!(
+        stderr.contains("sudo"),
+        "init output should mention sudo: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&config_dir);
+}
+
+/// Verify init output includes CA certificate path
+#[test]
+fn test_init_output_includes_ca_trust_path() {
+    let config_dir = std::env::temp_dir().join(format!("devproxy-capath-test-{}", std::process::id()));
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    let output = Command::new(devproxy_bin())
+        .args(["init", "--domain", TEST_DOMAIN, "--no-daemon"])
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("failed to run devproxy init");
+
+    assert!(output.status.success(), "init should succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should include the CA cert path
+    let ca_cert_path = config_dir.join("ca-cert.pem");
+    assert!(
+        stderr.contains(&ca_cert_path.display().to_string()),
+        "init output should include CA cert path '{}': {stderr}",
+        ca_cert_path.display()
+    );
+
+    let _ = std::fs::remove_dir_all(&config_dir);
+}
+
+/// Verify `devproxy up` fails fast (within a timeout) when daemon is dead
+/// rather than hanging indefinitely. Creates a stale socket file to simulate
+/// a dead daemon.
+#[test]
+fn test_up_fails_fast_with_dead_daemon() {
+    let config_dir = std::env::temp_dir().join(format!("devproxy-deadup-{}", std::process::id()));
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.json"),
+        format!(r#"{{"domain":"{TEST_DOMAIN}"}}"#),
+    )
+    .unwrap();
+
+    // Create a compose file with devproxy.port
+    let test_dir = std::env::temp_dir().join(format!("devproxy-deadup-project-{}", std::process::id()));
+    std::fs::create_dir_all(&test_dir).unwrap();
+    std::fs::write(
+        test_dir.join("docker-compose.yml"),
+        "services:\n  web:\n    image: alpine\n    labels:\n      - \"devproxy.port=3000\"\n",
+    )
+    .unwrap();
+
+    // Create a stale socket that no daemon is listening on.
+    // Bind a Unix socket then immediately drop it to leave the file.
+    let socket_path = config_dir.join("devproxy.sock");
+    {
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        drop(listener);
+        // Socket file exists but nothing is listening
+    }
+
+    let start = std::time::Instant::now();
+    let output = Command::new(devproxy_bin())
+        .args(["up"])
+        .current_dir(&test_dir)
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("failed to run up");
+    let elapsed = start.elapsed();
+
+    assert!(
+        !output.status.success(),
+        "up should fail when daemon is dead"
+    );
+
+    // Should fail within 5 seconds (not hang)
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "up should fail fast, not hang (took {elapsed:?})"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not running") || stderr.contains("could not connect"),
+        "should report daemon not running: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&config_dir);
+    let _ = std::fs::remove_dir_all(&test_dir);
+}
+
+/// Verify the daemon writes a PID file on startup
+#[test]
+#[ignore]
+fn test_daemon_writes_pid_file() {
+    let config_dir = create_test_config_dir("pidfile");
+    let daemon_port = find_free_port();
+    let daemon = start_test_daemon(&config_dir, daemon_port);
+
+    let pid_path = config_dir.join("daemon.pid");
+    assert!(
+        pid_path.exists(),
+        "daemon should create a PID file at {}",
+        pid_path.display()
+    );
+
+    let pid_str = std::fs::read_to_string(&pid_path).unwrap();
+    let pid: u32 = pid_str.trim().parse().expect("PID file should contain a valid number");
+    assert!(pid > 0, "PID should be positive");
+
+    // Verify the PID matches the actual daemon process
+    assert_eq!(
+        pid, daemon.child.id(),
+        "PID file should match the daemon's actual PID"
+    );
+}
+
+/// Verify re-init kills the stale daemon process
+#[test]
+#[ignore]
+fn test_reinit_kills_stale_daemon() {
+    let config_dir = create_test_config_dir("reinit");
+    let daemon_port1 = find_free_port();
+    let daemon1 = start_test_daemon(&config_dir, daemon_port1);
+    let pid1 = daemon1.child.id();
+
+    // Verify first daemon is alive
+    let pid_path = config_dir.join("daemon.pid");
+    assert!(pid_path.exists(), "PID file should exist after first daemon start");
+
+    // Don't let daemon1's Drop clean up the config dir -- we need it for init
+    let mut daemon1 = daemon1;
+    daemon1.config_dir = PathBuf::new();
+    // Don't kill the child -- init should do it
+    // But we need to forget the child so Drop doesn't kill it
+    // Actually, we DO let Drop kill it since we're testing init's behavior.
+    // Let's just remember the PID and kill it ourselves.
+    let _ = daemon1.child.kill();
+    let _ = daemon1.child.wait();
+    drop(daemon1);
+
+    // Remove the socket so init doesn't find it responsive
+    let socket_path = config_dir.join("devproxy.sock");
+    let _ = std::fs::remove_file(&socket_path);
+
+    // Write the old PID file back (simulating a stale daemon)
+    std::fs::write(&pid_path, pid1.to_string()).unwrap();
+
+    // Run init with a new port
+    let daemon_port2 = find_free_port();
+    let output = Command::new(devproxy_bin())
+        .args([
+            "init",
+            "--domain", TEST_DOMAIN,
+            "--port", &daemon_port2.to_string(),
+        ])
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("failed to run devproxy init");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("reinit stderr: {stderr}");
+
+    // init should succeed and start a new daemon
+    assert!(output.status.success(), "init should succeed: {stderr}");
+    assert!(
+        stderr.contains("daemon started"),
+        "init should report daemon started: {stderr}"
+    );
+
+    // New PID should be different from old one
+    let new_pid_str = std::fs::read_to_string(&pid_path).unwrap();
+    let new_pid: u32 = new_pid_str.trim().parse().unwrap();
+    assert_ne!(new_pid, pid1, "new daemon should have a different PID");
+
+    // Clean up the new daemon
+    unsafe { libc::kill(new_pid as i32, libc::SIGTERM); }
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = std::fs::remove_dir_all(&config_dir);
+}

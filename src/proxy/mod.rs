@@ -15,17 +15,22 @@ use router::Router;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixListener};
 
-/// RAII guard that removes the IPC socket file on drop, ensuring cleanup
-/// on both normal shutdown and error paths.
-struct SocketCleanupGuard {
-    path: std::path::PathBuf,
+/// RAII guard that removes the IPC socket and PID file on drop, ensuring
+/// cleanup on both normal shutdown and error paths.
+struct DaemonCleanupGuard {
+    socket_path: std::path::PathBuf,
+    pid_path: std::path::PathBuf,
 }
 
-impl Drop for SocketCleanupGuard {
+impl Drop for DaemonCleanupGuard {
     fn drop(&mut self) {
-        if self.path.exists() {
-            let _ = std::fs::remove_file(&self.path);
-            eprintln!("cleaned up socket: {}", self.path.display());
+        if self.socket_path.exists() {
+            let _ = std::fs::remove_file(&self.socket_path);
+            eprintln!("cleaned up socket: {}", self.socket_path.display());
+        }
+        if self.pid_path.exists() {
+            let _ = std::fs::remove_file(&self.pid_path);
+            eprintln!("cleaned up pid file: {}", self.pid_path.display());
         }
     }
 }
@@ -85,8 +90,17 @@ pub async fn run_daemon(port: u16) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o777))?;
     }
-    // Ensure the socket file is removed when the daemon exits (normal or error).
-    let _socket_guard = SocketCleanupGuard { path: socket_path.clone() };
+
+    // Write PID file so init can find and kill stale daemons
+    let pid_path = Config::pid_path()?;
+    std::fs::write(&pid_path, std::process::id().to_string())
+        .with_context(|| format!("could not write PID file at {}", pid_path.display()))?;
+
+    // Ensure the socket and PID files are removed when the daemon exits (normal or error).
+    let _cleanup_guard = DaemonCleanupGuard {
+        socket_path: socket_path.clone(),
+        pid_path,
+    };
     eprintln!("IPC listening on {}", socket_path.display());
 
     // Set up HTTPS listener
