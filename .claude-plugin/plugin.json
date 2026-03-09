@@ -1,0 +1,8 @@
+{
+  "name": "devproxy",
+  "version": "0.1.0",
+  "description": "Claude Code skill for setting up and using devproxy — local HTTPS dev subdomains for Docker Compose projects",
+  "repository": "https://github.com/foundra-build/devproxy",
+  "license": "MIT",
+  "keywords": ["devproxy", "https", "docker", "proxy", "tls", "dev-environment"]
+}
