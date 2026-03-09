@@ -299,7 +299,7 @@ if output="$(PATH="$wrapper_dir:$PATH" \
    sh "$INSTALL_SCRIPT" 2>&1)"; then
     fail "404 should cause non-zero exit"
 else
-    if echo "$output" | grep -qi "error\|fail"; then
+    if echo "$output" | grep -Eqi "error|fail"; then
         pass "404 produces error message"
     else
         fail "404 exited non-zero but no error in output" "$output"
@@ -339,12 +339,100 @@ if output="$(PATH="$MINIMAL_BIN" \
    sh "$INSTALL_SCRIPT" 2>&1)"; then
     fail "missing downloader should cause non-zero exit"
 else
-    if echo "$output" | grep -qi "curl\|wget"; then
+    if echo "$output" | grep -Eqi "curl|wget"; then
         pass "missing downloader error mentions curl/wget"
     else
         fail "missing downloader exited non-zero but no curl/wget mention" "$output"
     fi
 fi
+
+# ============================================================
+# Test 7: Gatekeeper fix — Darwin guard present with xattr and codesign
+# ============================================================
+echo "=== Test 7: Gatekeeper fix — Darwin guard ==="
+
+assert_file_contains() {
+    _file="$1"
+    _pattern="$2"
+    _desc="$3"
+    if grep -Eq "$_pattern" "$_file"; then
+        pass "$_desc"
+    else
+        fail "$_desc" "pattern '$_pattern' not found in $_file"
+    fi
+}
+
+assert_line_before() {
+    _file="$1"
+    _first="$2"
+    _second="$3"
+    _desc="$4"
+    _line_first="$(grep -n "$_first" "$_file" | head -1 | cut -d: -f1)"
+    _line_second="$(grep -n "$_second" "$_file" | head -1 | cut -d: -f1)"
+    if [ -z "$_line_first" ] || [ -z "$_line_second" ]; then
+        fail "$_desc" "could not find lines for '$_first' or '$_second'"
+    elif [ "$_line_first" -lt "$_line_second" ]; then
+        pass "$_desc"
+    else
+        fail "$_desc" "'$_first' (line $_line_first) should come before '$_second' (line $_line_second)"
+    fi
+}
+
+# Darwin guard present
+assert_file_contains "$INSTALL_SCRIPT" 'uname -s.*Darwin' "install.sh contains Darwin guard"
+assert_file_contains "$INSTALL_SCRIPT" 'xattr -cr' "install.sh contains xattr -cr"
+assert_file_contains "$INSTALL_SCRIPT" 'codesign --force --sign -' "install.sh contains codesign"
+
+# Signing happens after chmod
+echo "=== Test 8: Gatekeeper fix — ordering ==="
+assert_line_before "$INSTALL_SCRIPT" 'chmod 755' 'xattr -cr' "chmod before xattr"
+assert_line_before "$INSTALL_SCRIPT" 'chmod 755' 'codesign' "chmod before codesign"
+assert_line_before "$INSTALL_SCRIPT" 'xattr -cr' 'codesign' "xattr before codesign"
+
+# xattr and codesign only on Darwin
+echo "=== Test 9: Gatekeeper fix — Darwin-only guard ==="
+
+# Verify xattr and codesign are between Darwin if and fi
+_darwin_line="$(grep -n 'uname -s.*Darwin' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)"
+_xattr_line="$(grep -n 'xattr -cr' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)"
+_codesign_line="$(grep -n 'codesign --force --sign -' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)"
+# Find the closing fi of the Darwin block. The Darwin if is indented at
+# 4 spaces, so its fi is also at 4 spaces. Skip inner fi lines (8 spaces).
+_fi_line="$(awk -v start="$_darwin_line" 'NR > start && /^    fi$/ { print NR; exit }' "$INSTALL_SCRIPT")"
+
+if [ -n "$_darwin_line" ] && [ -n "$_xattr_line" ] && [ -n "$_codesign_line" ] && [ -n "$_fi_line" ]; then
+    if [ "$_darwin_line" -lt "$_xattr_line" ] && \
+       [ "$_xattr_line" -lt "$_codesign_line" ] && \
+       [ "$_codesign_line" -lt "$_fi_line" ]; then
+        pass "xattr and codesign are inside Darwin if/fi block"
+    else
+        fail "xattr and codesign ordering within Darwin block" \
+             "darwin=$_darwin_line xattr=$_xattr_line codesign=$_codesign_line fi=$_fi_line"
+    fi
+else
+    fail "could not find all Darwin guard markers" \
+         "darwin=$_darwin_line xattr=$_xattr_line codesign=$_codesign_line fi=$_fi_line"
+fi
+
+# ============================================================
+# Test 10: SKILL.md contains update command
+# ============================================================
+echo "=== Test 10: SKILL.md contains update command ==="
+
+SKILL_MD="$REPO_ROOT/skills/devproxy/SKILL.md"
+
+assert_file_contains "$SKILL_MD" 'devproxy update' "SKILL.md contains 'devproxy update'"
+assert_file_contains "$SKILL_MD" 'devproxy --version' "SKILL.md contains 'devproxy --version'"
+assert_file_contains "$SKILL_MD" 'self-update|Check for updates' "SKILL.md contains update description"
+
+# ============================================================
+# Test 11: SKILL.md contains Gatekeeper common issue
+# ============================================================
+echo "=== Test 11: SKILL.md Gatekeeper common issue ==="
+
+assert_file_contains "$SKILL_MD" 'Gatekeeper|quarantine' "SKILL.md mentions Gatekeeper/quarantine"
+assert_file_contains "$SKILL_MD" 'xattr -cr' "SKILL.md mentions xattr -cr"
+assert_file_contains "$SKILL_MD" 'codesign' "SKILL.md mentions codesign"
 
 # ============================================================
 # Summary

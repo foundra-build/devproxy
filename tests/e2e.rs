@@ -198,6 +198,11 @@ fn test_cli_help() {
     assert!(stdout.contains("down"));
     assert!(stdout.contains("ls"));
     assert!(stdout.contains("status"));
+    assert!(stdout.contains("update"), "help should list the update command");
+    assert!(
+        stdout.contains("Check for updates") || stdout.contains("self-update"),
+        "help should include update command description"
+    );
     // Daemon should be hidden as a top-level command (it may appear in descriptions)
     // Check that "daemon" does not appear as a command entry (lines starting with "  daemon")
     assert!(
@@ -206,6 +211,29 @@ fn test_cli_help() {
             .any(|l| l.trim_start().starts_with("daemon ")),
         "daemon command should be hidden from help"
     );
+}
+
+#[test]
+fn test_cli_version() {
+    let output = Command::new(devproxy_bin())
+        .arg("--version")
+        .output()
+        .expect("failed to run devproxy --version");
+
+    assert!(output.status.success(), "--version should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("devproxy"),
+        "--version output should contain 'devproxy': {stdout}"
+    );
+    // Should contain a semver-like version string
+    let has_version = stdout
+        .split_whitespace()
+        .any(|w| {
+            let parts: Vec<&str> = w.split('.').collect();
+            parts.len() == 3 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
+        });
+    assert!(has_version, "--version output should contain a version number: {stdout}");
 }
 
 #[test]

@@ -5,3 +5,4 @@ pub mod ls;
 pub mod open;
 pub mod status;
 pub mod up;
+pub mod update;
