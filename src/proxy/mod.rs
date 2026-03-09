@@ -32,6 +32,18 @@ pub async fn run_daemon(port: u16) -> Result<()> {
 
     // Set up IPC socket -- check for an already-running daemon first
     let socket_path = Config::socket_path()?;
+
+    // Unix domain socket paths are limited to ~104 bytes on macOS (108 on Linux).
+    // Validate upfront to give a clear error instead of a confusing bind failure.
+    let socket_path_len = socket_path.as_os_str().len();
+    if socket_path_len > 100 {
+        bail!(
+            "socket path is too long ({socket_path_len} bytes, max ~100): {}. \
+             Use a shorter DEVPROXY_CONFIG_DIR.",
+            socket_path.display()
+        );
+    }
+
     if socket_path.exists() {
         // Try to connect asynchronously to see if another daemon is already listening
         if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
@@ -113,18 +125,27 @@ async fn handle_ipc_connection(
     Ok(())
 }
 
+/// Maximum number of concurrent connections the proxy will handle.
+/// Prevents resource exhaustion from connection floods.
+const MAX_CONCURRENT_CONNECTIONS: usize = 512;
+
 /// Accept TLS connections and proxy them
 async fn https_proxy_loop(
     listener: TcpListener,
     acceptor: tokio_rustls::TlsAcceptor,
     router: Router,
 ) -> Result<()> {
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+
     loop {
         let (tcp_stream, _addr) = listener.accept().await?;
         let acceptor = acceptor.clone();
         let router = router.clone();
+        let permit = semaphore.clone().acquire_owned().await
+            .context("connection semaphore closed")?;
 
         tokio::spawn(async move {
+            let _permit = permit; // held until task completes
             match acceptor.accept(tcp_stream).await {
                 Ok(tls_stream) => {
                     let router = router.clone();
@@ -198,14 +219,23 @@ async fn proxy_to_upstream(
 ) -> Result<HyperResponse<Full<Bytes>>> {
     use http_body_util::BodyExt;
 
-    let stream = TcpStream::connect(upstream_addr)
+    // Timeout upstream connect + handshake at 30 seconds to avoid
+    // hanging indefinitely on unresponsive containers.
+    const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let stream = tokio::time::timeout(UPSTREAM_TIMEOUT, TcpStream::connect(upstream_addr))
         .await
+        .context("upstream connect timed out")?
         .with_context(|| format!("could not connect to upstream at {upstream_addr}"))?;
 
     let io = hyper_util::rt::TokioIo::new(stream);
 
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+    let (mut sender, conn) = tokio::time::timeout(
+        UPSTREAM_TIMEOUT,
+        hyper::client::conn::http1::handshake(io),
+    )
         .await
+        .context("upstream handshake timed out")?
         .context("upstream handshake failed")?;
 
     tokio::spawn(async move {
@@ -256,11 +286,12 @@ async fn proxy_to_upstream(
 
     let status = resp.status();
     let resp_headers = resp.headers().clone();
-    let body = resp
-        .into_body()
+    // Cap response body at 100MB, matching the request body limit.
+    let limited_resp = http_body_util::Limited::new(resp.into_body(), MAX_BODY_SIZE);
+    let body = limited_resp
         .collect()
         .await
-        .map_err(|e| anyhow::anyhow!("failed to collect upstream response: {e}"))?
+        .map_err(|e| anyhow::anyhow!("upstream response too large (max {MAX_BODY_SIZE} bytes): {e}"))?
         .to_bytes();
 
     let mut resp_builder = HyperResponse::builder()
