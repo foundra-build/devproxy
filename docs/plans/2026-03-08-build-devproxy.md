@@ -10,9 +10,12 @@
 
 **Key design decisions:**
 - hyper 0.14 (from spec) is legacy. We use hyper 1.x + hyper-util which is the current stable API. tokio-rustls 0.26 + rustls 0.23 match.
-- The `--port` flag on the daemon enables e2e testing on high ports without sudo.
+- The `--port` flag on both `daemon` and `init` enables e2e testing on high ports without sudo. `init --port 8443` forwards the port to the spawned daemon. `init --no-daemon` generates certs without spawning a daemon (used by e2e tests that manage the daemon lifecycle themselves).
 - `DEVPROXY_CONFIG_DIR` env var overrides the default config directory (`dirs::config_dir()/devproxy`). This is essential for test isolation because `dirs::config_dir()` on macOS uses `NSSearchPathForDirectoriesInDomains` which ignores `HOME`.
 - `devproxy up` writes `.devproxy-project` (containing the slug) and `.devproxy-override.yml` (containing port binding). `devproxy down` and `devproxy open` read `.devproxy-project` to identify the current project's slug. Both files are `.gitignore`d.
+- `init` is idempotent: it skips CA generation if the CA already exists, and skips wildcard cert generation if the cert already exists. Running `init` twice is safe and will not invalidate a running daemon's certs.
+- E2e tests each copy fixtures into an isolated temp directory and bind the daemon to a unique ephemeral port, so they can run in parallel without interfering.
+- `find_compose_file()` lives in `config.rs` as a shared utility used by both `up` and `down`.
 
 ---
 
@@ -84,6 +87,8 @@ git commit -m "chore: add all dependencies to Cargo.toml"
 
 **Step 1: Write the CLI module**
 
+Note: `init` accepts `--port` (forwarded to daemon) and `--no-daemon` (skip daemon spawn). The `daemon` subcommand accepts `--port`.
+
 ```rust
 // src/cli.rs
 use clap::{Parser, Subcommand};
@@ -102,6 +107,12 @@ pub enum Commands {
         /// Domain for dev subdomains (e.g., mysite.dev)
         #[arg(long, default_value = "mysite.dev")]
         domain: String,
+        /// Port for the daemon to listen on (default: 443)
+        #[arg(long, default_value = "443")]
+        port: u16,
+        /// Skip starting the daemon (useful for CI or testing)
+        #[arg(long, default_value = "false")]
+        no_daemon: bool,
     },
     /// Start this project and assign a dev subdomain
     Up,
@@ -136,8 +147,8 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { domain } => {
-            eprintln!("init: domain={domain}");
+        Commands::Init { domain, port, no_daemon } => {
+            eprintln!("init: domain={domain} port={port} no_daemon={no_daemon}");
         }
         Commands::Up => {
             eprintln!("up");
@@ -165,6 +176,9 @@ fn main() {
 
 Run: `cd /Users/chrisfenton/Code/personal/devproxy/.worktrees/build-devproxy && cargo run -- --help`
 Expected: Shows help with Init, Up, Down, Ls, Open, Status commands (Daemon hidden)
+
+Run: `cd /Users/chrisfenton/Code/personal/devproxy/.worktrees/build-devproxy && cargo run -- init --help`
+Expected: Shows `--domain`, `--port`, and `--no-daemon` flags
 
 **Step 4: Commit**
 
@@ -248,7 +262,12 @@ git commit -m "feat: add random slug generator with unit tests"
 
 ## Task 4: Config Module (config.rs)
 
-This is the foundation module. It provides all path resolution, and critically supports the `DEVPROXY_CONFIG_DIR` environment variable for test isolation. On macOS, `dirs::config_dir()` ignores `HOME`, so we cannot rely on `HOME` manipulation for testing. Every path method goes through `config_dir()` which checks the env var first.
+This is the foundation module. It provides all path resolution, compose file discovery, and project file management.
+
+Key points:
+- `config_dir()` checks `DEVPROXY_CONFIG_DIR` env var first (essential for test isolation, since `dirs::config_dir()` on macOS ignores `HOME`).
+- `find_compose_file()` is a shared utility used by both `up` and `down` (not duplicated).
+- `write_project_file()` / `read_project_file()` manage the `.devproxy-project` slug tracking file.
 
 **Files:**
 - Create: `src/config.rs`
@@ -404,6 +423,19 @@ pub fn parse_compose_file(path: &Path) -> Result<ComposeFile> {
     Ok(compose)
 }
 
+/// Find the docker-compose file in the given directory.
+/// Searches for docker-compose.yml, docker-compose.yaml, compose.yml, compose.yaml.
+/// Returns the full path.
+pub fn find_compose_file(dir: &Path) -> Result<PathBuf> {
+    for name in &["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"] {
+        let path = dir.join(name);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    bail!("no docker-compose.yml found in {}", dir.display())
+}
+
 /// Write the port-override compose file
 pub fn write_override_file(dir: &Path, service_name: &str, host_port: u16, container_port: u16) -> Result<PathBuf> {
     let path = dir.join(".devproxy-override.yml");
@@ -538,6 +570,22 @@ services:
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains(".devproxy-project"));
     }
+
+    #[test]
+    fn find_compose_file_finds_standard_names() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("docker-compose.yml"), "services: {}").unwrap();
+        let found = find_compose_file(dir.path()).unwrap();
+        assert_eq!(found.file_name().unwrap(), "docker-compose.yml");
+    }
+
+    #[test]
+    fn find_compose_file_missing_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = find_compose_file(dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no docker-compose.yml"));
+    }
 }
 ```
 
@@ -548,7 +596,7 @@ Add `mod config;` to `src/main.rs`.
 **Step 3: Run tests**
 
 Run: `cd /Users/chrisfenton/Code/personal/devproxy/.worktrees/build-devproxy && cargo test config`
-Expected: 8 tests pass
+Expected: 10 tests pass
 
 **Step 4: Commit**
 
@@ -1554,6 +1602,12 @@ pub mod up;
 
 **Step 2: Write commands/init.rs**
 
+Key behavior:
+- `--port` is forwarded to the daemon subprocess.
+- `--no-daemon` skips daemon spawn entirely (used by e2e tests).
+- Idempotent: skips CA if it exists, skips wildcard cert if it exists. Running `init` twice does not invalidate a running daemon's certs.
+- `DEVPROXY_CONFIG_DIR` is forwarded to the daemon subprocess so it uses the same config dir.
+
 ```rust
 // src/commands/init.rs
 use crate::config::Config;
@@ -1561,7 +1615,7 @@ use crate::proxy::cert;
 use anyhow::{Context, Result};
 use colored::Colorize;
 
-pub fn run(domain: &str) -> Result<()> {
+pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     let config = Config { domain: domain.to_string() };
 
     // Create config directory
@@ -1598,40 +1652,49 @@ pub fn run(domain: &str) -> Result<()> {
         }
     }
 
-    // Generate wildcard cert
+    // Generate wildcard cert if it doesn't exist
     let tls_cert_path = Config::tls_cert_path()?;
     let tls_key_path = Config::tls_key_path()?;
 
-    let ca_cert_pem = std::fs::read_to_string(&ca_cert_path)?;
-    let ca_key_pem = std::fs::read_to_string(&ca_key_path)?;
+    if tls_cert_path.exists() && tls_key_path.exists() {
+        eprintln!("{} TLS certificate already exists", "ok:".green());
+    } else {
+        let ca_cert_pem = std::fs::read_to_string(&ca_cert_path)?;
+        let ca_key_pem = std::fs::read_to_string(&ca_key_path)?;
 
-    eprintln!("generating wildcard TLS certificate for *.{domain}...");
-    let (tls_cert_pem, tls_key_pem) = cert::generate_wildcard_cert(domain, &ca_cert_pem, &ca_key_pem)?;
-    cert::write_pem(&tls_cert_path, &tls_cert_pem)?;
-    cert::write_pem(&tls_key_path, &tls_key_pem)?;
-    eprintln!("{} TLS certificate generated", "ok:".green());
+        eprintln!("generating wildcard TLS certificate for *.{domain}...");
+        let (tls_cert_pem, tls_key_pem) = cert::generate_wildcard_cert(domain, &ca_cert_pem, &ca_key_pem)?;
+        cert::write_pem(&tls_cert_path, &tls_cert_pem)?;
+        cert::write_pem(&tls_key_path, &tls_key_pem)?;
+        eprintln!("{} TLS certificate generated", "ok:".green());
+    }
 
     // Save config
     config.save()?;
     eprintln!("{} config saved", "ok:".green());
 
-    // Start daemon
-    eprintln!("starting daemon...");
-    let exe = std::env::current_exe().context("could not determine binary path")?;
+    // Start daemon (unless --no-daemon)
+    if no_daemon {
+        eprintln!("{} daemon spawn skipped (--no-daemon)", "ok:".green());
+    } else {
+        eprintln!("starting daemon on port {port}...");
+        let exe = std::env::current_exe().context("could not determine binary path")?;
 
-    // Pass DEVPROXY_CONFIG_DIR to the daemon if set, so the daemon uses the same config dir
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(["daemon"]);
-    if let Ok(dir) = std::env::var("DEVPROXY_CONFIG_DIR") {
-        cmd.env("DEVPROXY_CONFIG_DIR", dir);
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(["daemon", "--port", &port.to_string()]);
+
+        // Forward DEVPROXY_CONFIG_DIR so the daemon uses the same config dir
+        if let Ok(dir) = std::env::var("DEVPROXY_CONFIG_DIR") {
+            cmd.env("DEVPROXY_CONFIG_DIR", dir);
+        }
+
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit());
+
+        let child = cmd.spawn().context("could not spawn daemon")?;
+        eprintln!("{} daemon started (pid: {})", "ok:".green(), child.id());
     }
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit());
-
-    let child = cmd.spawn().context("could not spawn daemon")?;
-
-    eprintln!("{} daemon started (pid: {})", "ok:".green(), child.id());
 
     eprintln!();
     eprintln!("{}", "Setup complete!".green().bold());
@@ -1649,7 +1712,7 @@ pub fn run(domain: &str) -> Result<()> {
 
 **Step 3: Write commands/up.rs**
 
-Note: `up` writes both `.devproxy-override.yml` (port binding) and `.devproxy-project` (slug). The `.devproxy-project` file is how `down` and `open` know which slug belongs to this directory.
+Uses `config::find_compose_file()` (shared utility, not duplicated). Writes both `.devproxy-override.yml` and `.devproxy-project`.
 
 ```rust
 // src/commands/up.rs
@@ -1662,8 +1725,9 @@ pub fn run() -> Result<()> {
     // Check config exists (implies init was run)
     let config = Config::load().context("run `devproxy init` first")?;
 
-    // Find docker-compose.yml
-    let compose_path = find_compose_file()?;
+    // Find docker-compose.yml (shared utility from config module)
+    let cwd = std::env::current_dir()?;
+    let compose_path = config::find_compose_file(&cwd)?;
     let compose_dir = compose_path
         .parent()
         .context("compose file has no parent directory")?;
@@ -1697,7 +1761,7 @@ pub fn run() -> Result<()> {
         override_path.display().to_string().cyan()
     );
 
-    // Write project file (slug tracking — used by `down` and `open`)
+    // Write project file (slug tracking -- used by `down` and `open`)
     config::write_project_file(compose_dir, &slug)?;
 
     // Run docker compose up
@@ -1735,25 +1799,11 @@ pub fn run() -> Result<()> {
 
     Ok(())
 }
-
-fn find_compose_file() -> Result<std::path::PathBuf> {
-    let cwd = std::env::current_dir()?;
-    for name in &["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"] {
-        let path = cwd.join(name);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-    bail!(
-        "no docker-compose.yml found in {}",
-        cwd.display()
-    )
-}
 ```
 
 **Step 4: Write commands/down.rs**
 
-`down` reads `.devproxy-project` to get the slug, then passes `--project-name <slug>` to `docker compose down` so it targets the correct containers (since `up` used `--project-name <slug>`).
+Uses `config::find_compose_file()` (same shared utility as `up`). Reads `.devproxy-project` to get the slug, then passes `--project-name <slug>` to `docker compose down` so it targets the correct containers.
 
 ```rust
 // src/commands/down.rs
@@ -1768,15 +1818,20 @@ pub fn run() -> Result<()> {
     let slug = config::read_project_file(&cwd)?;
     eprintln!("project: {}", slug.cyan());
 
-    // Find the compose file name (docker compose needs it for the service definitions)
-    let compose_file = find_compose_file_name(&cwd)?;
+    // Find the compose file name (shared utility from config module)
+    let compose_path = config::find_compose_file(&cwd)?;
+    let compose_file_name = compose_path
+        .file_name()
+        .context("no filename")?
+        .to_string_lossy()
+        .to_string();
 
     // Run docker compose down with the correct project name
     let status = std::process::Command::new("docker")
         .args([
             "compose",
             "-f",
-            &compose_file,
+            &compose_file_name,
             "-f",
             ".devproxy-override.yml",
             "--project-name",
@@ -1806,15 +1861,6 @@ pub fn run() -> Result<()> {
 
     eprintln!("{} project stopped", "ok:".green());
     Ok(())
-}
-
-fn find_compose_file_name(dir: &std::path::Path) -> Result<String> {
-    for name in &["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"] {
-        if dir.join(name).exists() {
-            return Ok(name.to_string());
-        }
-    }
-    anyhow::bail!("no docker-compose.yml found in {}", dir.display())
 }
 ```
 
@@ -1893,7 +1939,7 @@ pub async fn run() -> Result<()> {
 
 **Step 7: Write commands/open.rs**
 
-`open` reads `.devproxy-project` to get the current directory's slug, then queries the daemon for the matching route to construct the correct URL.
+Reads `.devproxy-project` to identify THIS project's slug, then queries daemon for the matching route.
 
 ```rust
 // src/commands/open.rs
@@ -1966,7 +2012,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { domain } => commands::init::run(&domain),
+        Commands::Init { domain, port, no_daemon } => commands::init::run(&domain, port, no_daemon),
         Commands::Up => commands::up::run(),
         Commands::Down => commands::down::run(),
         Commands::Ls => {
@@ -2017,7 +2063,12 @@ git commit -m "feat: add all CLI command implementations with project file track
 
 ## Task 11: E2E Test Harness Setup
 
-All e2e tests use `DEVPROXY_CONFIG_DIR` to isolate config into a temp directory. This is the only reliable approach because `dirs::config_dir()` on macOS ignores `HOME` (it uses `NSSearchPathForDirectoriesInDomains`).
+All e2e tests use `DEVPROXY_CONFIG_DIR` for config isolation and each test gets:
+- Its own temp directory for config.
+- Its own copy of the fixtures directory (so `.devproxy-override.yml` and `.devproxy-project` writes don't collide).
+- Its own ephemeral daemon port (via `config::find_free_port` equivalent), so tests can run in parallel without port conflicts.
+
+The `init --no-daemon` flag is used to generate certs cleanly without spawning a daemon. Each test that needs a daemon starts one explicitly on its own unique port.
 
 **Files:**
 - Create: `tests/e2e.rs`
@@ -2050,15 +2101,22 @@ services:
 //!
 //! Requirements:
 //! - Docker and Docker Compose must be available
-//! - Tests run the daemon on a high port (8443) -- no sudo needed
+//! - Tests run the daemon on ephemeral high ports -- no sudo needed
 //!
-//! Test isolation: All tests use DEVPROXY_CONFIG_DIR to point at a temp directory.
-//! This is essential because dirs::config_dir() on macOS ignores HOME.
+//! Test isolation strategy:
+//! - DEVPROXY_CONFIG_DIR env var points each test at its own temp config dir.
+//!   (dirs::config_dir() on macOS ignores HOME, so DEVPROXY_CONFIG_DIR is the
+//!   only reliable way to isolate config.)
+//! - Each test copies tests/fixtures/ into its own temp dir so that
+//!   .devproxy-override.yml and .devproxy-project writes do not collide.
+//! - Each test binds the daemon to a unique ephemeral port, so parallel tests
+//!   do not fight over a shared port.
 //!
 //! Run with: cargo test --test e2e
 //! Run full suite: cargo test --test e2e -- --include-ignored
 
-use std::path::PathBuf;
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -2071,51 +2129,70 @@ fn devproxy_bin() -> PathBuf {
     path
 }
 
-/// Helper to get the fixtures directory
-fn fixtures_dir() -> PathBuf {
+/// Helper to get the source fixtures directory
+fn fixtures_src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-/// Test daemon port (high port, no sudo needed)
-const DAEMON_PORT: u16 = 8443;
 const TEST_DOMAIN: &str = "test.devproxy.dev";
 
-/// Create an isolated test config directory and write config + certs into it.
-/// Returns the path to the config directory (set as DEVPROXY_CONFIG_DIR).
+/// Find a free ephemeral port. Each test calls this to get its own unique daemon port.
+fn find_free_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+/// Copy the fixtures directory into an isolated temp dir for one test.
+/// Returns the path to the copy (which contains docker-compose.yml, Dockerfile, etc).
+fn copy_fixtures(test_name: &str) -> PathBuf {
+    let dest = std::env::temp_dir().join(format!("devproxy-fixtures-{test_name}-{}", std::process::id()));
+    if dest.exists() {
+        std::fs::remove_dir_all(&dest).unwrap();
+    }
+    std::fs::create_dir_all(&dest).unwrap();
+
+    let src = fixtures_src_dir();
+    for entry in std::fs::read_dir(&src).unwrap() {
+        let entry = entry.unwrap();
+        let dest_path = dest.join(entry.file_name());
+        std::fs::copy(entry.path(), &dest_path).unwrap();
+    }
+    dest
+}
+
+/// Create an isolated test config directory and generate certs using `init --no-daemon`.
+/// Returns the path to the config directory (to be set as DEVPROXY_CONFIG_DIR).
 fn create_test_config_dir(test_name: &str) -> PathBuf {
-    let config_dir = std::env::temp_dir().join(format!("devproxy-test-{test_name}-{}", std::process::id()));
+    let config_dir = std::env::temp_dir().join(format!("devproxy-config-{test_name}-{}", std::process::id()));
+    if config_dir.exists() {
+        std::fs::remove_dir_all(&config_dir).unwrap();
+    }
     std::fs::create_dir_all(&config_dir).unwrap();
 
-    // Generate certs by running `devproxy init` with DEVPROXY_CONFIG_DIR set.
-    // The daemon it spawns will fail to bind (port 443) or will use default port,
-    // but the certs and config will be written. We kill it and start our own daemon.
+    // Generate certs without spawning a daemon (--no-daemon)
     let output = Command::new(devproxy_bin())
-        .args(["init", "--domain", TEST_DOMAIN])
+        .args(["init", "--domain", TEST_DOMAIN, "--no-daemon"])
         .env("DEVPROXY_CONFIG_DIR", &config_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to run devproxy init");
+        .expect("failed to run devproxy init --no-daemon");
+
+    assert!(
+        output.status.success(),
+        "init --no-daemon should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify certs were created
     assert!(config_dir.join("ca-cert.pem").exists(), "CA cert should exist after init");
     assert!(config_dir.join("tls-cert.pem").exists(), "TLS cert should exist after init");
     assert!(config_dir.join("config.json").exists(), "config should exist after init");
 
-    // Kill any daemon that init may have spawned (it tries to bind :443 which may fail,
-    // or it may have spawned on :443 which we don't want)
-    let sock = config_dir.join("devproxy.sock");
-    if sock.exists() {
-        let _ = std::fs::remove_file(&sock);
-    }
-
-    // Give spawned daemon a moment to die from socket removal, then clean up
-    std::thread::sleep(Duration::from_millis(200));
-
     config_dir
 }
 
-/// Guard that kills the daemon on drop
+/// Guard that kills the daemon on drop and cleans up the config dir
 struct DaemonGuard {
     child: Child,
     config_dir: PathBuf,
@@ -2129,11 +2206,11 @@ impl Drop for DaemonGuard {
     }
 }
 
-/// Start a daemon on DAEMON_PORT with the given config dir.
+/// Start a daemon on the given port with the given config dir.
 /// Waits until the IPC socket is connectable.
-fn start_test_daemon(config_dir: &PathBuf) -> DaemonGuard {
+fn start_test_daemon(config_dir: &Path, port: u16) -> DaemonGuard {
     let child = Command::new(devproxy_bin())
-        .args(["daemon", "--port", &DAEMON_PORT.to_string()])
+        .args(["daemon", "--port", &port.to_string()])
         .env("DEVPROXY_CONFIG_DIR", config_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -2142,7 +2219,7 @@ fn start_test_daemon(config_dir: &PathBuf) -> DaemonGuard {
 
     let guard = DaemonGuard {
         child,
-        config_dir: config_dir.clone(),
+        config_dir: config_dir.to_path_buf(),
     };
 
     // Wait for IPC socket to become connectable
@@ -2159,7 +2236,7 @@ fn start_test_daemon(config_dir: &PathBuf) -> DaemonGuard {
     panic!("daemon did not start within 5 seconds (socket: {})", socket_path.display());
 }
 
-/// Guard that runs docker compose down on drop
+/// Guard that runs docker compose down on drop and cleans up the fixtures copy
 struct ComposeGuard {
     project_name: String,
     compose_dir: PathBuf,
@@ -2182,13 +2259,12 @@ impl Drop for ComposeGuard {
             .stderr(Stdio::null())
             .status();
 
-        // Clean up generated files
-        let _ = std::fs::remove_file(self.compose_dir.join(".devproxy-override.yml"));
-        let _ = std::fs::remove_file(self.compose_dir.join(".devproxy-project"));
+        // Clean up fixtures copy
+        let _ = std::fs::remove_dir_all(&self.compose_dir);
     }
 }
 
-// ── Non-Docker tests (always run) ──────────────────────────────────────────
+// ---- Non-Docker tests (always run) ----------------------------------------
 
 #[test]
 fn test_cli_help() {
@@ -2212,19 +2288,30 @@ fn test_init_generates_certs() {
     let config_dir = std::env::temp_dir().join(format!("devproxy-init-test-{}", std::process::id()));
     std::fs::create_dir_all(&config_dir).unwrap();
 
-    let _output = Command::new(devproxy_bin())
-        .args(["init", "--domain", TEST_DOMAIN])
+    let output = Command::new(devproxy_bin())
+        .args(["init", "--domain", TEST_DOMAIN, "--no-daemon"])
         .env("DEVPROXY_CONFIG_DIR", &config_dir)
         .output()
         .expect("failed to run devproxy init");
 
+    assert!(output.status.success(), "init should succeed");
     assert!(config_dir.join("ca-cert.pem").exists(), "CA cert should exist");
     assert!(config_dir.join("ca-key.pem").exists(), "CA key should exist");
     assert!(config_dir.join("tls-cert.pem").exists(), "TLS cert should exist");
     assert!(config_dir.join("tls-key.pem").exists(), "TLS key should exist");
     assert!(config_dir.join("config.json").exists(), "config should exist");
 
-    // Clean up (kills any daemon that was spawned)
+    // Verify idempotency: running init again should succeed and not error
+    let output2 = Command::new(devproxy_bin())
+        .args(["init", "--domain", TEST_DOMAIN, "--no-daemon"])
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("failed to run devproxy init a second time");
+
+    assert!(output2.status.success(), "init should be idempotent");
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    assert!(stderr2.contains("already exists"), "should report certs already exist");
+
     let _ = std::fs::remove_dir_all(&config_dir);
 }
 
@@ -2293,18 +2380,19 @@ fn test_up_without_label() {
     let _ = std::fs::remove_dir_all(&test_dir);
 }
 
-// ── Docker-dependent tests (run with --include-ignored) ────────────────────
+// ---- Docker-dependent tests (run with --include-ignored) -------------------
 
 /// Full e2e: init -> up -> curl through proxy -> ls -> status -> down
 #[test]
 #[ignore] // Run with: cargo test --test e2e -- --ignored
 fn test_full_e2e_workflow() {
     let config_dir = create_test_config_dir("e2e");
-    let _daemon = start_test_daemon(&config_dir);
+    let daemon_port = find_free_port();
+    let _daemon = start_test_daemon(&config_dir, daemon_port);
 
-    let fixtures = fixtures_dir();
+    let fixtures = copy_fixtures("e2e");
 
-    // Build fixture image
+    // Build fixture image (in the copy dir; Dockerfile is there)
     let build_status = Command::new("docker")
         .args(["compose", "build"])
         .current_dir(&fixtures)
@@ -2326,7 +2414,7 @@ fn test_full_e2e_workflow() {
     eprintln!("up output: {up_stderr}");
     assert!(up_output.status.success(), "devproxy up should succeed: {up_stderr}");
 
-    // Extract slug from output (look for the URL line "-> https://<slug>.test.devproxy.dev")
+    // Extract slug from output (look for "-> https://<slug>.test.devproxy.dev")
     let slug = up_stderr
         .lines()
         .find(|l| l.contains(&format!(".{TEST_DOMAIN}")))
@@ -2337,7 +2425,7 @@ fn test_full_e2e_workflow() {
         })
         .expect("should find slug in up output");
 
-    // Verify .devproxy-project was written
+    // Verify .devproxy-project was written with the correct slug
     let project_file = fixtures.join(".devproxy-project");
     assert!(project_file.exists(), ".devproxy-project should exist after up");
     let saved_slug = std::fs::read_to_string(&project_file).unwrap();
@@ -2378,7 +2466,7 @@ fn test_full_e2e_workflow() {
     // Curl through the proxy (--resolve bypasses DNS, --cacert trusts our test CA)
     let ca_cert_path = config_dir.join("ca-cert.pem");
     let host = format!("{slug}.{TEST_DOMAIN}");
-    let url = format!("https://{host}:{DAEMON_PORT}/");
+    let url = format!("https://{host}:{daemon_port}/");
 
     let curl_output = Command::new("curl")
         .args([
@@ -2387,7 +2475,7 @@ fn test_full_e2e_workflow() {
             "--max-time",
             "5",
             "--resolve",
-            &format!("{host}:{DAEMON_PORT}:127.0.0.1"),
+            &format!("{host}:{daemon_port}:127.0.0.1"),
             "--cacert",
             &ca_cert_path.to_string_lossy(),
             &url,
@@ -2402,7 +2490,7 @@ fn test_full_e2e_workflow() {
         String::from_utf8_lossy(&curl_output.stderr)
     );
 
-    // Down (via devproxy, which reads .devproxy-project for the slug)
+    // Down (reads .devproxy-project to get slug, passes --project-name to compose)
     let down_output = Command::new(devproxy_bin())
         .args(["down"])
         .current_dir(&fixtures)
@@ -2422,9 +2510,10 @@ fn test_full_e2e_workflow() {
 #[ignore]
 fn test_self_healing_route_removed_on_container_die() {
     let config_dir = create_test_config_dir("heal");
-    let _daemon = start_test_daemon(&config_dir);
+    let daemon_port = find_free_port();
+    let _daemon = start_test_daemon(&config_dir, daemon_port);
 
-    let fixtures = fixtures_dir();
+    let fixtures = copy_fixtures("heal");
 
     // Build + Up
     let _ = Command::new("docker")
@@ -2495,9 +2584,10 @@ fn test_self_healing_route_removed_on_container_die() {
 #[ignore]
 fn test_daemon_restart_rebuilds_routes() {
     let config_dir = create_test_config_dir("restart");
-    let daemon = start_test_daemon(&config_dir);
+    let daemon_port = find_free_port();
+    let daemon = start_test_daemon(&config_dir, daemon_port);
 
-    let fixtures = fixtures_dir();
+    let fixtures = copy_fixtures("restart");
 
     // Build + Up
     let _ = Command::new("docker")
@@ -2528,12 +2618,19 @@ fn test_daemon_restart_rebuilds_routes() {
 
     std::thread::sleep(Duration::from_secs(2));
 
-    // Kill the daemon (not the container)
-    drop(daemon);
+    // Kill the daemon (not the container) -- DaemonGuard::drop kills process and cleans config_dir,
+    // but we need the config_dir to survive for the new daemon. So we kill manually.
+    let mut daemon = daemon;
+    let _ = daemon.child.kill();
+    let _ = daemon.child.wait();
+    // Prevent DaemonGuard::drop from deleting config_dir by forgetting it
+    std::mem::forget(daemon);
+
     std::thread::sleep(Duration::from_millis(500));
 
-    // Start a new daemon -- it should rebuild routes from running containers
-    let _daemon2 = start_test_daemon(&config_dir);
+    // Start a new daemon on a fresh port -- it should rebuild routes from running containers
+    let daemon_port2 = find_free_port();
+    let _daemon2 = start_test_daemon(&config_dir, daemon_port2);
 
     // Check that the route was rebuilt
     let ls_output = Command::new(devproxy_bin())
@@ -2567,7 +2664,7 @@ Expected: `test_cli_help`, `test_init_generates_certs`, `test_status_without_dae
 
 ```bash
 git add tests/ justfile
-git commit -m "feat: add e2e test harness with DEVPROXY_CONFIG_DIR isolation"
+git commit -m "feat: add e2e test harness with per-test isolation"
 ```
 
 ---
