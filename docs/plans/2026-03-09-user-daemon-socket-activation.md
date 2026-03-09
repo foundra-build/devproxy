@@ -6,9 +6,9 @@
 
 **Architecture:** The daemon gains a new code path to receive pre-bound TCP listeners from launchd/systemd instead of calling `TcpListener::bind()` directly. On macOS, `devproxy init` installs a LaunchAgent plist with a Sockets entry for port 443; launchd owns the socket and passes fds via `launch_activate_socket`. On Linux, init installs systemd user socket+service units; systemd passes fds via the `LISTEN_FDS` protocol. On Linux without systemd, `setcap cap_net_bind_service=+ep` is applied as a fallback so the binary can bind port 443 directly as a user. The existing `TcpListener::bind()` path remains as the final fallback for tests and `--no-daemon` scenarios.
 
-The `platform` module provides three operations: `stop_daemon()` uses `launchctl bootout`/`systemctl --user stop` to halt the process without removing plist/unit files. `restart_daemon()` uses `launchctl kickstart -k`/`systemctl --user restart` to kill and restart the process in-place (used by `devproxy update` after binary replacement). `uninstall_daemon()` both stops and removes the files (used by `devproxy init` before re-installing).
+The `platform` module provides three operations: `stop_daemon()` uses `launchctl bootout`/`systemctl --user stop` to halt and **unload** the process (used by `kill_stale_daemon` when the daemon is not platform-managed, and by init's uninstall-before-reinstall flow). `restart_daemon()` uses `launchctl kickstart -k`/`systemctl --user restart` to atomically kill and restart the process in-place while keeping the agent loaded (used by `devproxy update` after binary replacement — no bootout needed). `uninstall_daemon()` both stops and removes the files (used by `devproxy init` before re-installing).
 
-All platform operations (`stop_daemon`, `restart_daemon`, `install_daemon`) are gated on whether the platform-managed files actually exist (plist on macOS, unit files on Linux). This prevents cross-environment interference: `stop_daemon()` called in a test using `DEVPROXY_CONFIG_DIR` won't touch a real LaunchAgent unless the plist file is present. Additionally, `DEVPROXY_NO_SOCKET_ACTIVATION=1` skips all platform operations (install, stop, restart, uninstall) for complete test isolation.
+All platform operations (`stop_daemon`, `restart_daemon`, `install_daemon`) are gated on whether the platform-managed files actually exist (plist on macOS, unit files on Linux). This prevents cross-environment interference: `stop_daemon()` called in a test using `DEVPROXY_CONFIG_DIR` won't touch a real LaunchAgent unless the plist file is present. Additionally, `DEVPROXY_NO_SOCKET_ACTIVATION=1` skips all platform operations (install, stop, restart, uninstall) AND fd acquisition (`acquire_listener`) for complete test isolation.
 
 **Tech Stack:** Rust, tokio, libc (for `launch_activate_socket` FFI on macOS), std::env (for `LISTEN_FDS` on Linux), plist XML generation, systemd unit file generation, Docker (for Linux e2e tests from macOS).
 
@@ -61,7 +61,16 @@ use tokio::net::TcpListener;
 /// Attempt to acquire a pre-bound TCP listener from the OS socket activation
 /// mechanism. Returns `Ok(None)` if socket activation is not active (caller
 /// should fall back to `TcpListener::bind()`).
+///
+/// Respects `DEVPROXY_NO_SOCKET_ACTIVATION`: when set, skips all fd
+/// acquisition and returns `Ok(None)` immediately. This prevents tests
+/// from accidentally picking up unrelated file descriptors (e.g. stale
+/// `LISTEN_FDS` in the environment, or launchd fds meant for another service).
 pub async fn acquire_listener() -> Result<Option<TcpListener>> {
+    if std::env::var("DEVPROXY_NO_SOCKET_ACTIVATION").is_ok() {
+        return Ok(None);
+    }
+
     match acquire_activated_fds()? {
         Some(fds) if !fds.is_empty() => {
             let fd = fds[0];
@@ -206,6 +215,17 @@ mod tests {
     #[tokio::test]
     async fn test_acquire_listener_returns_none_when_not_activated() {
         let result = acquire_listener().await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_acquire_listener_skips_when_socket_activation_disabled() {
+        // Even if LISTEN_FDS were somehow set, the env var gate should
+        // make acquire_listener() return None immediately.
+        std::env::set_var("DEVPROXY_NO_SOCKET_ACTIVATION", "1");
+        let result = acquire_listener().await;
+        std::env::remove_var("DEVPROXY_NO_SOCKET_ACTIVATION");
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
@@ -1202,23 +1222,80 @@ git commit -m "feat: kill_stale_daemon uses platform stop (not uninstall) before
 ### Task 6: Update `devproxy update` to restart platform-managed daemon after binary replacement
 
 **Files:**
-- Modify: `src/commands/update.rs` (add `restart_daemon()` call after binary replacement)
+- Modify: `src/commands/update.rs` (restructure daemon lifecycle in `do_update`)
 
 **Step 1: Understand the problem**
 
-`do_update` calls `kill_stale_daemon()` which (after Task 5) calls `platform::stop_daemon()`. On macOS, `stop_daemon()` uses `launchctl bootout` which fully unloads the agent from launchd's session. The binary is then replaced in-place. But nothing re-bootstraps the agent afterward — the user must run `devproxy init` manually.
+The current `do_update` calls `kill_stale_daemon()` which (after Task 5) calls `platform::stop_daemon()`. On macOS, `stop_daemon()` uses `launchctl bootout` which fully **unloads** the agent from launchd's session. After that, `launchctl kickstart -k` cannot restart it because the agent is no longer registered. `kickstart` only works on a loaded agent.
 
-On Linux, `systemctl --user stop` keeps the unit loaded (just stops the process), so systemd would re-activate on the next connection to the socket. This asymmetry means update works differently on the two platforms.
+The correct approach for update:
+1. Replace the binary on disk (safe on Unix — the running process holds an inode reference)
+2. Call `restart_daemon()` which uses `launchctl kickstart -k` (atomically kills the running process and starts a fresh one with the new binary, all while keeping the agent loaded)
 
-Fix: after binary replacement, call `platform::restart_daemon()`. On macOS this uses `launchctl kickstart -k` (kill and restart in one step, keeps the agent loaded). On Linux this uses `systemctl --user restart`. If no platform-managed daemon exists, the function returns `Ok(false)` and we fall through to the existing "run `devproxy init`" hint.
+No `bootout` is needed. `kickstart -k` is the single-step restart mechanism. On Linux, `systemctl --user restart` is similarly atomic.
 
-**Step 2: Add restart after binary replacement**
+For non-platform-managed daemons (direct-spawn fallback), we still need `kill_stale_daemon()` + "run init" hint.
 
-In `do_update`, after the binary has been replaced and before the final success message, add:
+**Step 2: Restructure `do_update` to skip `kill_stale_daemon` for platform-managed daemons**
+
+Replace the daemon stop + binary replace section in `do_update` (around lines 289-302) with:
+
+```rust
+fn do_update(download_url: &str, exe_path: &Path, tmpfile: &Path) -> Result<()> {
+    download_file(download_url, tmpfile)?;
+    validate_binary_magic(tmpfile)?;
+    prepare_binary(tmpfile)?;
+
+    // For non-platform-managed daemons, stop before replacing the binary
+    // (the existing kill-before-replace approach). For platform-managed
+    // daemons, we skip this — kickstart -k / systemctl restart will handle
+    // the stop+start atomically after replacement.
+    let is_platform_managed = !crate::platform::is_socket_activation_disabled()
+        && is_daemon_platform_managed();
+
+    if !is_platform_managed {
+        let socket_path = crate::config::Config::socket_path()?;
+        if socket_path.exists()
+            && crate::ipc::ping_sync(&socket_path, std::time::Duration::from_secs(2))
+        {
+            eprintln!("{} stopping daemon for update...", "info:".cyan());
+            super::init::kill_stale_daemon()?;
+        }
+    }
+
+    replace_binary(tmpfile, exe_path)?;
+
+    Ok(())
+}
+
+/// Check if the daemon is managed by a platform service manager
+/// (launchd plist exists on macOS, systemd unit exists on Linux).
+fn is_daemon_platform_managed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::platform::launchagent_plist_path()
+            .map(|p| p.exists())
+            .unwrap_or(false)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::platform::systemd_user_dir()
+            .map(|d| d.join("devproxy.socket").exists())
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        false
+    }
+}
+```
+
+Then in the `run()` function (after `do_update` succeeds), replace the existing "run init" hint with:
 
 ```rust
     // Restart the platform-managed daemon with the new binary.
-    // The plist/unit files still point to the same binary path.
+    // kickstart -k / systemctl restart atomically kills the old process
+    // and starts a new one — no bootout/bootstrap dance needed.
     match crate::platform::restart_daemon() {
         Ok(true) => {
             eprintln!(
@@ -1253,7 +1330,7 @@ Expected: PASS
 
 ```bash
 git add src/commands/update.rs
-git commit -m "feat: restart platform-managed daemon after self-update binary replacement"
+git commit -m "feat: restart platform-managed daemon after self-update via kickstart/systemctl restart"
 ```
 
 ---
@@ -1498,9 +1575,11 @@ RUN cp target/release/devproxy /usr/local/bin/devproxy
 
 FROM debian:bookworm
 
-# Install systemd + dbus + libcap2-bin (for setcap/getcap)
+# Install systemd + dbus + libcap2-bin (for setcap/getcap) + python3 (for LISTEN_FDS test)
+# dbus is required for systemd user manager communication (systemctl --user).
 RUN apt-get update && \
-    apt-get install -y systemd dbus libcap2-bin curl procps && \
+    apt-get install -y systemd systemd-sysv dbus dbus-user-session \
+        libcap2-bin curl procps python3 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary and test scripts
@@ -1513,8 +1592,13 @@ RUN chmod +x /tests/*.sh
 # Create a non-root user for testing user-level systemd/setcap
 RUN useradd -m -s /bin/bash testuser
 
-# Enable lingering so systemd user session works without login
-RUN loginctl enable-linger testuser 2>/dev/null || mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/testuser
+# Enable lingering so systemd starts a user manager for testuser at boot
+# (required for `systemctl --user` to work without an interactive login).
+RUN mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/testuser
+
+# Create XDG_RUNTIME_DIR for testuser (uid 1000).
+# systemd user manager and dbus session bus need this directory.
+RUN mkdir -p /run/user/1000 && chown testuser:testuser /run/user/1000 && chmod 700 /run/user/1000
 
 # Use systemd as init (PID 1) so systemctl --user works
 STOPSIGNAL SIGRTMIN+3
@@ -1528,10 +1612,22 @@ ENTRYPOINT ["/sbin/init"]
 # tests/linux-docker/test-systemd.sh
 # Tests the systemd socket activation path.
 # Run inside the Docker container as testuser.
+# Requires: XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS set by caller.
 
 set -euo pipefail
 
 echo "=== Test: systemd socket activation ==="
+
+# Verify user session prerequisites
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    echo "FAIL: XDG_RUNTIME_DIR not set (required for systemctl --user)"
+    exit 1
+fi
+if ! systemctl --user is-active default.target >/dev/null 2>&1; then
+    echo "FAIL: systemd user manager not running. Is lingering enabled?"
+    systemctl --user status 2>&1 || true
+    exit 1
+fi
 
 export DEVPROXY_CONFIG_DIR="/tmp/devproxy-test-systemd"
 mkdir -p "$DEVPROXY_CONFIG_DIR"
@@ -1778,17 +1874,34 @@ CONTAINER_ID=$(docker run -d --privileged \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     devproxy-linux-test)
 
-# Wait for systemd to fully initialize
+# Wait for systemd to fully initialize (system + user manager)
 echo "Waiting for systemd to initialize..."
 for i in $(seq 1 30); do
-    if docker exec "$CONTAINER_ID" systemctl is-system-running --quiet 2>/dev/null; then
-        break
-    fi
     if docker exec "$CONTAINER_ID" systemctl is-system-running 2>/dev/null | grep -q "running\|degraded"; then
         break
     fi
     sleep 1
 done
+
+# Wait for testuser's user manager to start (enabled via lingering).
+# This is required for `systemctl --user` to work.
+echo "Waiting for testuser's systemd user manager..."
+for i in $(seq 1 15); do
+    if docker exec "$CONTAINER_ID" systemctl is-active user@1000.service 2>/dev/null | grep -q "active"; then
+        break
+    fi
+    sleep 1
+done
+
+# Helper: run a command as testuser with proper user session environment.
+# XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS are required for
+# `systemctl --user` to communicate with the user's systemd manager.
+run_as_testuser() {
+    docker exec -u testuser \
+        -e XDG_RUNTIME_DIR=/run/user/1000 \
+        -e DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+        "$CONTAINER_ID" bash "$@"
+}
 
 FAILED=0
 
@@ -1796,7 +1909,7 @@ echo ""
 echo "=========================================="
 echo "Running LISTEN_FDS test..."
 echo "=========================================="
-if docker exec -u testuser "$CONTAINER_ID" bash /tests/test-listen-fds.sh; then
+if run_as_testuser /tests/test-listen-fds.sh; then
     echo ">>> LISTEN_FDS: PASS"
 else
     echo ">>> LISTEN_FDS: FAIL"
@@ -1807,7 +1920,7 @@ echo ""
 echo "=========================================="
 echo "Running systemd test..."
 echo "=========================================="
-if docker exec -u testuser "$CONTAINER_ID" bash -c "export XDG_RUNTIME_DIR=/run/user/\$(id -u) && /tests/test-systemd.sh"; then
+if run_as_testuser /tests/test-systemd.sh; then
     echo ">>> systemd: PASS"
 else
     echo ">>> systemd: FAIL"
@@ -1926,11 +2039,11 @@ git commit -m "style: cargo fmt"
 
 ## Design decisions made
 
-1. **`stop_daemon()` vs `restart_daemon()` vs `uninstall_daemon()`**: `stop_daemon()` halts the process (bootout/systemctl stop) without removing files. `restart_daemon()` kills and restarts the process in-place (kickstart -k on macOS, systemctl restart on Linux) — used by `devproxy update` after binary replacement. `uninstall_daemon()` stops and deletes files. `kill_stale_daemon` uses stop (for init's kill-before-reinstall flow), while `do_update` uses stop + binary replace + restart.
+1. **`stop_daemon()` vs `restart_daemon()` vs `uninstall_daemon()`**: `stop_daemon()` halts the process (`launchctl bootout`/`systemctl stop`) without removing files — bootout **unloads** the agent from launchd's session entirely. `restart_daemon()` atomically kills and restarts the process in-place (`launchctl kickstart -k`/`systemctl restart`) keeping the agent loaded — used by `devproxy update` after binary replacement. `uninstall_daemon()` stops and deletes files. Critical: `do_update` must NOT call `stop_daemon()` (bootout) before `restart_daemon()` (kickstart) — after bootout, the agent is unloaded and kickstart cannot find it. Instead, update replaces the binary then calls `restart_daemon()` directly. `kill_stale_daemon` (which calls `stop_daemon`) is only used for non-platform-managed daemons during update, and by init's kill-before-reinstall flow.
 
 2. **File-existence guard on `stop_daemon()`**: On macOS, `stop_daemon()` checks if `~/Library/LaunchAgents/com.devproxy.daemon.plist` exists before calling `launchctl bootout`. On Linux, it checks if `~/.config/systemd/user/devproxy.socket` exists before calling `systemctl stop`. This prevents tests using `DEVPROXY_CONFIG_DIR` from accidentally booting out a real production LaunchAgent.
 
-3. **`DEVPROXY_NO_SOCKET_ACTIVATION` env var**: All four public functions (`install_daemon`, `stop_daemon`, `restart_daemon`, `uninstall_daemon`) respect this. `install_daemon` returns `Err` (triggers fallback). `stop_daemon`, `restart_daemon` (returns `Ok(false)`), and `uninstall_daemon` return `Ok` (no-op). This gives tests complete isolation from the host's service management.
+3. **`DEVPROXY_NO_SOCKET_ACTIVATION` env var**: All four platform functions (`install_daemon`, `stop_daemon`, `restart_daemon`, `uninstall_daemon`) AND the fd acquisition function (`acquire_listener`) respect this. `install_daemon` returns `Err` (triggers fallback). `stop_daemon`, `restart_daemon` (returns `Ok(false)`), and `uninstall_daemon` return `Ok` (no-op). `acquire_listener` returns `Ok(None)` (falls through to bind). This gives tests complete isolation from both the host's service management and any stray socket activation fds.
 
 4. **Systemd `ListenStream=127.0.0.1:{port}`**: The socket unit binds to localhost only, matching the macOS plist `SockNodeName=127.0.0.1` and the existing `TcpListener::bind("127.0.0.1:...")`. Using a bare port number would bind to `[::]` (all interfaces), exposing the dev proxy to the network.
 
@@ -1940,7 +2053,7 @@ git commit -m "style: cargo fmt"
 
 7. **Socket name "Listeners"**: Matches the plist Sockets key name. `launch_activate_socket("Listeners", ...)` retrieves fds for the socket named "Listeners" in the plist.
 
-8. **KeepAlive=true in plist**: Ensures launchd restarts the daemon if it crashes. `kill_stale_daemon` uses `launchctl bootout` (via `stop_daemon`) instead of SIGTERM to avoid launchd immediately restarting the process. `devproxy update` uses `restart_daemon()` (`launchctl kickstart -k`) after binary replacement so launchd picks up the new binary without requiring `devproxy init`.
+8. **KeepAlive=true in plist**: Ensures launchd restarts the daemon if it crashes. `kill_stale_daemon` uses `launchctl bootout` (via `stop_daemon`) instead of SIGTERM to avoid launchd immediately restarting the process. `devproxy update` skips bootout entirely and uses `restart_daemon()` (`launchctl kickstart -k`) after binary replacement — kickstart atomically kills and restarts the agent while keeping it loaded, so launchd picks up the new binary. Critical: bootout and kickstart must not be used in sequence, as bootout unloads the agent and kickstart requires a loaded agent.
 
 9. **No new Cargo dependencies**: Uses `libc` (already a dependency) for `launch_activate_socket` FFI and standard library for systemd env var parsing.
 
@@ -1948,4 +2061,8 @@ git commit -m "style: cargo fmt"
 
 11. **`restart_daemon()` for update flow**: `devproxy update` calls `kill_stale_daemon` (which uses `stop_daemon` = `launchctl bootout`), replaces the binary, then calls `restart_daemon()`. On macOS, `launchctl kickstart -k` kills and restarts the agent in one atomic operation without unloading it. On Linux, `systemctl --user restart` does the equivalent. Without this, macOS update would leave the agent unloaded (bootout removes it from launchd's session) while Linux would auto-restart (socket activation re-triggers) — an asymmetry. `restart_daemon()` returns `Ok(false)` if no platform-managed daemon is found, letting the caller fall through to a "run devproxy init" hint.
 
-12. **LaunchAgent test skip-if-existing guard**: The macOS launchd integration test (Task 8) checks for an existing production plist at `~/Library/LaunchAgents/com.devproxy.daemon.plist` and skips if found. Because the plist path and launchd label are global (not scoped by `DEVPROXY_CONFIG_DIR`), installing a test plist would `bootout` and overwrite the developer's real LaunchAgent. Skipping is simpler than parameterizing the label (which would thread a label argument through `generate_launchagent_plist`, `launchagent_plist_path`, `bootout_launchagent`, `install_launchagent`, and `launch_activate_socket`'s socket name). The test is already `#[ignore]`, so the skip only affects developers who have devproxy installed AND explicitly opt in.
+12. **`DEVPROXY_NO_SOCKET_ACTIVATION` gates fd acquisition too**: The env var check exists not only in the platform module (install/stop/restart/uninstall) but also in `acquire_listener()` in the socket_activation module. Without this, a test environment with stale `LISTEN_FDS` in the environment or launchd fds meant for another service could cause the daemon to pick up unrelated file descriptors. When the env var is set, `acquire_listener()` returns `Ok(None)` immediately, going straight to the `TcpListener::bind` fallback.
+
+13. **Docker systemd user session prerequisites**: Running `systemctl --user` in a Docker container requires: (a) `dbus` and `dbus-user-session` packages installed, (b) `XDG_RUNTIME_DIR=/run/user/{uid}` set and the directory created with correct ownership, (c) systemd user manager running for the test user (enabled via `loginctl enable-linger`), (d) `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus` set so systemctl can communicate with the user manager. The Dockerfile creates the runtime directory and enables lingering; the runner script passes both env vars via `docker exec -e` and waits for `user@1000.service` to be active before running tests. The systemd test script validates these prerequisites at the top and fails fast with a clear message if they're missing.
+
+14. **LaunchAgent test skip-if-existing guard**: The macOS launchd integration test (Task 8) checks for an existing production plist at `~/Library/LaunchAgents/com.devproxy.daemon.plist` and skips if found. Because the plist path and launchd label are global (not scoped by `DEVPROXY_CONFIG_DIR`), installing a test plist would `bootout` and overwrite the developer's real LaunchAgent. Skipping is simpler than parameterizing the label (which would thread a label argument through `generate_launchagent_plist`, `launchagent_plist_path`, `bootout_launchagent`, `install_launchagent`, and `launch_activate_socket`'s socket name). The test is already `#[ignore]`, so the skip only affects developers who have devproxy installed AND explicitly opt in.
