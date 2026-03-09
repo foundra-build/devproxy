@@ -129,6 +129,8 @@ assert_file_contains "re-checks tag before creation" "$RELEASE_YML" "Re-check.*t
 assert_file_contains "uses macos-latest for all macOS targets" "$RELEASE_YML" "macos-latest"
 assert_file_contains_fixed "has release concurrency group" "$RELEASE_YML" 'group: "release"'
 assert_file_contains_fixed "release concurrency does not cancel" "$RELEASE_YML" "cancel-in-progress: false"
+assert_file_contains_fixed "build jobs have timeout" "$RELEASE_YML" "timeout-minutes: 30"
+assert_file_contains "cross pinned with version comment" "$RELEASE_YML" "# cross v0.2.5"
 
 # ── Test 6: Release binary naming matches install script ──
 echo ""
@@ -157,7 +159,7 @@ assert_file_contains_fixed "Mentions x86_64-unknown-linux-gnu" "$RELDOC" "x86_64
 assert_file_contains_fixed "Mentions aarch64-unknown-linux-gnu" "$RELDOC" "aarch64-unknown-linux-gnu"
 assert_file_contains "Mentions manual release process" "$RELDOC" "Run workflow"
 assert_file_contains_fixed "Mentions DEVPROXY_VERSION" "$RELDOC" "DEVPROXY_VERSION"
-assert_file_contains "Mentions CI must be green before release" "$RELDOC" "CI.*green\|CI.*pass"
+assert_file_contains "Mentions CI must be green before release" "$RELDOC" "CI.*green"
 
 # ── Summary ──
 echo ""
