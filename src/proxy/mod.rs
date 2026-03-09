@@ -15,17 +15,22 @@ use router::Router;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixListener};
 
-/// RAII guard that removes the IPC socket file on drop, ensuring cleanup
-/// on both normal shutdown and error paths.
-struct SocketCleanupGuard {
-    path: std::path::PathBuf,
+/// RAII guard that removes the IPC socket and PID file on drop, ensuring
+/// cleanup on both normal shutdown and error paths.
+struct DaemonCleanupGuard {
+    socket_path: std::path::PathBuf,
+    pid_path: std::path::PathBuf,
 }
 
-impl Drop for SocketCleanupGuard {
+impl Drop for DaemonCleanupGuard {
     fn drop(&mut self) {
-        if self.path.exists() {
-            let _ = std::fs::remove_file(&self.path);
-            eprintln!("cleaned up socket: {}", self.path.display());
+        if self.socket_path.exists() {
+            let _ = std::fs::remove_file(&self.socket_path);
+            eprintln!("cleaned up socket: {}", self.socket_path.display());
+        }
+        if self.pid_path.exists() {
+            let _ = std::fs::remove_file(&self.pid_path);
+            eprintln!("cleaned up pid file: {}", self.pid_path.display());
         }
     }
 }
@@ -36,10 +41,7 @@ pub async fn run_daemon(port: u16) -> Result<()> {
     let router = Router::new(&config.domain);
 
     // Load TLS config
-    let tls_acceptor = cert::load_tls_config(
-        &Config::tls_cert_path()?,
-        &Config::tls_key_path()?,
-    )?;
+    let tls_acceptor = cert::load_tls_config(&Config::tls_cert_path()?, &Config::tls_key_path()?)?;
 
     // Load existing routes from running containers
     eprintln!("loading existing routes...");
@@ -85,8 +87,17 @@ pub async fn run_daemon(port: u16) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o777))?;
     }
-    // Ensure the socket file is removed when the daemon exits (normal or error).
-    let _socket_guard = SocketCleanupGuard { path: socket_path.clone() };
+
+    // Write PID file so init can find and kill stale daemons
+    let pid_path = Config::pid_path()?;
+    std::fs::write(&pid_path, std::process::id().to_string())
+        .with_context(|| format!("could not write PID file at {}", pid_path.display()))?;
+
+    // Ensure the socket and PID files are removed when the daemon exits (normal or error).
+    let _cleanup_guard = DaemonCleanupGuard {
+        socket_path: socket_path.clone(),
+        pid_path,
+    };
     eprintln!("IPC listening on {}", socket_path.display());
 
     // Set up HTTPS listener
@@ -104,9 +115,21 @@ pub async fn run_daemon(port: u16) -> Result<()> {
     let r3 = router.clone();
 
     tokio::try_join!(
-        async { https_proxy_loop(tcp_listener, tls_acceptor, r1).await.context("HTTPS proxy task failed") },
-        async { docker::watch_events(&r2).await.context("Docker watcher task failed") },
-        async { ipc_server_loop(ipc_listener, r3).await.context("IPC server task failed") },
+        async {
+            https_proxy_loop(tcp_listener, tls_acceptor, r1)
+                .await
+                .context("HTTPS proxy task failed")
+        },
+        async {
+            docker::watch_events(&r2)
+                .await
+                .context("Docker watcher task failed")
+        },
+        async {
+            ipc_server_loop(ipc_listener, r3)
+                .await
+                .context("IPC server task failed")
+        },
     )?;
 
     Ok(())
@@ -125,10 +148,7 @@ async fn ipc_server_loop(listener: UnixListener, router: Router) -> Result<()> {
     }
 }
 
-async fn handle_ipc_connection(
-    stream: tokio::net::UnixStream,
-    router: &Router,
-) -> Result<()> {
+async fn handle_ipc_connection(stream: tokio::net::UnixStream, router: &Router) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     // Limit reads to 64KB to prevent unbounded memory allocation from
     // malicious or malformed IPC messages.
@@ -136,8 +156,8 @@ async fn handle_ipc_connection(
     let mut line = String::new();
     buf_reader.read_line(&mut line).await?;
 
-    let request: Request = serde_json::from_str(line.trim())
-        .context("could not parse IPC request")?;
+    let request: Request =
+        serde_json::from_str(line.trim()).context("could not parse IPC request")?;
 
     let response = match request {
         Request::Ping => Response::Pong,
@@ -169,7 +189,10 @@ async fn https_proxy_loop(
         let (tcp_stream, _addr) = listener.accept().await?;
         let acceptor = acceptor.clone();
         let router = router.clone();
-        let permit = semaphore.clone().acquire_owned().await
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
             .context("connection semaphore closed")?;
 
         tokio::spawn(async move {
@@ -182,10 +205,9 @@ async fn https_proxy_loop(
                         async move { handle_request(req, &router).await }
                     });
 
-                    if let Err(e) =
-                        http1::Builder::new()
-                            .serve_connection(hyper_util::rt::TokioIo::new(tls_stream), service)
-                            .await
+                    if let Err(e) = http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(tls_stream), service)
+                        .await
                     {
                         eprintln!("  HTTP error: {e}");
                     }
@@ -225,7 +247,11 @@ async fn handle_request(
     };
 
     // Build upstream URI
-    let path_and_query = req.uri().path_and_query().map(|pq| pq.as_str().to_string()).unwrap_or_else(|| "/".to_string());
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
     let upstream_addr = format!("127.0.0.1:{host_port}");
 
     // Forward the request to the container
@@ -258,13 +284,11 @@ async fn proxy_to_upstream(
 
     let io = hyper_util::rt::TokioIo::new(stream);
 
-    let (mut sender, conn) = tokio::time::timeout(
-        UPSTREAM_TIMEOUT,
-        hyper::client::conn::http1::handshake(io),
-    )
-        .await
-        .context("upstream handshake timed out")?
-        .context("upstream handshake failed")?;
+    let (mut sender, conn) =
+        tokio::time::timeout(UPSTREAM_TIMEOUT, hyper::client::conn::http1::handshake(io))
+            .await
+            .context("upstream handshake timed out")?
+            .context("upstream handshake failed")?;
 
     tokio::spawn(async move {
         if let Err(e) = conn.await {
@@ -295,9 +319,7 @@ async fn proxy_to_upstream(
     // correct domain for URL generation, CSRF checks, and virtual host
     // routing. The upstream container is already targeted by the TCP
     // connection address.
-    let mut builder = HyperRequest::builder()
-        .method(method)
-        .uri(upstream_uri);
+    let mut builder = HyperRequest::builder().method(method).uri(upstream_uri);
 
     for (name, value) in headers.iter() {
         builder = builder.header(name.clone(), value.clone());
@@ -319,11 +341,12 @@ async fn proxy_to_upstream(
     let body = limited_resp
         .collect()
         .await
-        .map_err(|e| anyhow::anyhow!("upstream response too large (max {MAX_BODY_SIZE} bytes): {e}"))?
+        .map_err(|e| {
+            anyhow::anyhow!("upstream response too large (max {MAX_BODY_SIZE} bytes): {e}")
+        })?
         .to_bytes();
 
-    let mut resp_builder = HyperResponse::builder()
-        .status(status);
+    let mut resp_builder = HyperResponse::builder().status(status);
 
     for (name, value) in resp_headers.iter() {
         resp_builder = resp_builder.header(name.clone(), value.clone());

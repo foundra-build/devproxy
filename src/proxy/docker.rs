@@ -171,7 +171,10 @@ async fn watch_events_inner(router: &Router) -> Result<()> {
         .spawn()
         .context("failed to spawn docker events")?;
 
-    let stdout = child.stdout.take().context("no stdout from docker events")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("no stdout from docker events")?;
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
 
