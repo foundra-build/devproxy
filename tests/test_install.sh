@@ -55,16 +55,26 @@ WRAPPER
     echo "$_dir"
 }
 
+# --- Helper: build a harness script from install.sh ---
+# Strips everything from the sentinel marker line onward, then appends custom code.
+# This is more robust than matching a bare "main" line.
+make_harness() {
+    _harness_file="$1"
+    # Guard: verify the sentinel marker exists in install.sh
+    if ! grep -q '^# __DEVPROXY_INSTALL_MAIN__$' "$INSTALL_SCRIPT"; then
+        echo "FATAL: install.sh is missing the # __DEVPROXY_INSTALL_MAIN__ sentinel marker" >&2
+        exit 2
+    fi
+    sed '/^# __DEVPROXY_INSTALL_MAIN__$/,$d' "$INSTALL_SCRIPT" > "$_harness_file"
+}
+
 # --- Helper: extract detect_platform + construct_url and print TARGET/URL ---
-# We source a modified version of install.sh that calls detect_platform + construct_url then prints
 run_detection() {
     _uname_dir="$1"
     _base_url="${2:-https://github.com/foundra-build/devproxy/releases}"
     _version="${3:-latest}"
-    # Create a test harness that sources the functions and calls them
     _harness="$TMPDIR_ROOT/harness-$$.sh"
-    # Extract function definitions from install.sh, replace main call
-    sed 's/^main$//' "$INSTALL_SCRIPT" > "$_harness"
+    make_harness "$_harness"
     cat >> "$_harness" <<'HARNESS'
 detect_platform
 construct_url
@@ -106,20 +116,22 @@ done
 # ============================================================
 echo "=== Test 2: Unsupported platform error ==="
 
-# Helper for unsupported-platform tests: runs the harness directly
-# without suppressing stderr, so error messages can be captured.
+# Helper for unsupported-platform tests: runs the harness in a subshell
+# with set +e so the non-zero exit is captured rather than aborting.
 run_detection_with_stderr() {
     _uname_dir="$1"
     _harness="$TMPDIR_ROOT/harness-unsup-$$.sh"
-    sed 's/^main$//' "$INSTALL_SCRIPT" > "$_harness"
+    make_harness "$_harness"
     cat >> "$_harness" <<'HARNESS'
 detect_platform
 HARNESS
+    # Run in a subshell with set +e to capture the exit code properly
+    # and ensure cleanup of the harness file on both success and failure.
+    _rc=0
     PATH="$_uname_dir:$PATH" \
         DEVPROXY_INSTALL_BASE_URL="https://example.com" \
         DEVPROXY_VERSION="latest" \
-        sh "$_harness" 2>&1
-    _rc=$?
+        sh "$_harness" 2>&1 || _rc=$?
     rm -f "$_harness"
     return $_rc
 }
@@ -215,8 +227,16 @@ cd "$MOCK_DIR"
 python3 -m http.server "$MOCK_PORT" >/dev/null 2>&1 &
 MOCK_SERVER_PID=$!
 cd "$REPO_ROOT"
-# Give the server a moment to start
-sleep 1
+# Wait for mock server to be ready (retry up to 5 seconds)
+_retries=0
+while ! curl -s -o /dev/null "http://localhost:${MOCK_PORT}/" 2>/dev/null; do
+    _retries=$((_retries + 1))
+    if [ "$_retries" -ge 50 ]; then
+        echo "FATAL: mock HTTP server failed to start on port $MOCK_PORT" >&2
+        exit 2
+    fi
+    sleep 0.1
+done
 
 INSTALL_DIR="$TMPDIR_ROOT/install-target"
 mkdir -p "$INSTALL_DIR"

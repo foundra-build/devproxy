@@ -45,7 +45,11 @@ construct_url() {
 
 create_install_dir() {
     if [ ! -d "$DEVPROXY_INSTALL_DIR" ]; then
-        mkdir -p "$DEVPROXY_INSTALL_DIR"
+        if ! mkdir -p "$DEVPROXY_INSTALL_DIR" 2>/dev/null; then
+            echo "Error: failed to create install directory ${DEVPROXY_INSTALL_DIR}" >&2
+            echo "Try running with sudo or set DEVPROXY_INSTALL_DIR to a writable location." >&2
+            exit 1
+        fi
     fi
 }
 
@@ -83,4 +87,5 @@ verify_installation() {
     fi
 }
 
+# __DEVPROXY_INSTALL_MAIN__
 main
