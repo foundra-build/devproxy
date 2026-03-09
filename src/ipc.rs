@@ -78,6 +78,37 @@ async fn send_request_inner(socket_path: &Path, request: &Request) -> Result<Res
     Ok(response)
 }
 
+/// Send a synchronous IPC Ping to the daemon and return true if it responds
+/// with Pong within the given timeout. This is used by non-async code (init,
+/// up) that needs to verify the daemon is alive without a tokio runtime.
+///
+/// The wire format matches the async `send_request` path: a JSON-line
+/// `{"cmd":"ping"}` followed by shutdown(Write), then read a JSON-line
+/// response containing `"pong"`.
+pub fn ping_sync(socket_path: &Path, timeout: std::time::Duration) -> bool {
+    use std::io::{BufRead, Write};
+
+    let stream = match std::os::unix::net::UnixStream::connect(socket_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+
+    let mut writer = match stream.try_clone() {
+        Ok(w) => w,
+        Err(_) => return false,
+    };
+    if writer.write_all(b"{\"cmd\":\"ping\"}\n").is_err() {
+        return false;
+    }
+    writer.shutdown(std::net::Shutdown::Write).ok();
+
+    let mut reader = std::io::BufReader::new(&stream);
+    let mut response = String::new();
+    reader.read_line(&mut response).is_ok() && response.contains("pong")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +146,13 @@ mod tests {
             }
             _ => panic!("expected Routes response"),
         }
+    }
+
+    #[test]
+    fn ping_sync_returns_false_on_nonexistent_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("nonexistent.sock");
+        assert!(!ping_sync(&sock_path, std::time::Duration::from_millis(100)));
     }
 
     /// Verify that send_request_with_timeout returns an error when the

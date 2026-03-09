@@ -746,7 +746,9 @@ fn test_init_output_includes_sudo_note() {
     let _ = std::fs::remove_dir_all(&config_dir);
 }
 
-/// Verify init output includes CA certificate path
+/// Verify init output includes CA certificate path. The path appears in
+/// the cert generation output and/or the trust failure message, regardless
+/// of whether automatic trust succeeds or fails.
 #[test]
 fn test_init_output_includes_ca_trust_path() {
     let config_dir = std::env::temp_dir().join(format!("devproxy-capath-test-{}", std::process::id()));
@@ -761,7 +763,10 @@ fn test_init_output_includes_ca_trust_path() {
     assert!(output.status.success(), "init should succeed");
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // Should include the CA cert path
+    // The CA cert path should appear somewhere in the output -- either in
+    // the trust failure remediation instructions or (if trust succeeded)
+    // in the "Next steps" CA trust section. Since tests run without sudo,
+    // trust will fail and the path appears in the warning.
     let ca_cert_path = config_dir.join("ca-cert.pem");
     assert!(
         stderr.contains(&ca_cert_path.display().to_string()),
@@ -795,7 +800,9 @@ fn test_up_fails_fast_with_dead_daemon() {
     .unwrap();
 
     // Create a stale socket file that no daemon is listening on.
-    // Bind a Unix socket then immediately drop it -- the file remains on disk.
+    // Bind a Unix socket then immediately drop it. On Unix, dropping a
+    // UnixListener does NOT remove the socket file -- it just closes the
+    // fd. The file remains on disk as an inert socket node.
     let socket_path = config_dir.join("devproxy.sock");
     {
         let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
@@ -894,6 +901,7 @@ fn test_reinit_kills_stale_daemon() {
         &mut daemon1.child,
         Command::new("true").spawn().unwrap(),
     );
+    // Drop the guard -- its Drop will kill+wait the "true" dummy (harmless).
     drop(daemon1);
 
     // Verify the old daemon is still alive

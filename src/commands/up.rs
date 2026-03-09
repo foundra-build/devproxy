@@ -56,37 +56,15 @@ pub fn run() -> Result<()> {
         bail!("daemon is not running (no socket at {}). Run `devproxy init` first.", socket_path.display());
     }
 
-    // Send an actual IPC ping with a timeout to verify the daemon is
-    // responsive, not just that a stale socket file exists. The JSON format
-    // must match the canonical Request/Response protocol defined in ipc.rs.
-    {
-        use std::io::{BufRead, Write};
-        let ping_timeout = std::time::Duration::from_secs(2);
-        let daemon_alive = (|| -> bool {
-            let mut stream = match std::os::unix::net::UnixStream::connect(&socket_path) {
-                Ok(s) => s,
-                Err(_) => return false,
-            };
-            stream.set_read_timeout(Some(ping_timeout)).ok();
-            stream.set_write_timeout(Some(ping_timeout)).ok();
-            let ping = b"{\"cmd\":\"ping\"}\n";
-            if stream.write_all(ping).is_err() {
-                return false;
-            }
-            stream.shutdown(std::net::Shutdown::Write).ok();
-            let mut reader = std::io::BufReader::new(&stream);
-            let mut response = String::new();
-            reader.read_line(&mut response).is_ok() && response.contains("pong")
-        })();
-
-        if !daemon_alive {
-            let _ = std::fs::remove_file(&override_path);
-            let _ = std::fs::remove_file(compose_dir.join(".devproxy-project"));
-            bail!(
-                "daemon is not running (no response from {}). Run `devproxy init` first.",
-                socket_path.display()
-            );
-        }
+    // Send an actual IPC ping with a 2s timeout to verify the daemon is
+    // responsive, not just that a stale socket file exists.
+    if !crate::ipc::ping_sync(&socket_path, std::time::Duration::from_secs(2)) {
+        let _ = std::fs::remove_file(&override_path);
+        let _ = std::fs::remove_file(compose_dir.join(".devproxy-project"));
+        bail!(
+            "daemon is not running (no response from {}). Run `devproxy init` first.",
+            socket_path.display()
+        );
     }
 
     // Run docker compose up

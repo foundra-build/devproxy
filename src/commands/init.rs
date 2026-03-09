@@ -92,21 +92,27 @@ fn kill_stale_daemon() -> Result<()> {
     if pid_path.exists() {
         let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            // Check if process is alive. kill(pid, 0) returns 0 if we can
-            // signal it, or -1 with EPERM if it exists but we lack permission.
-            let ret = unsafe { libc::kill(pid, 0) };
-            let alive = ret == 0;
-            let alive_but_no_perms = ret == -1
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-
-            if alive_but_no_perms {
-                bail!(
-                    "stale daemon (pid: {pid}) is running but owned by another user. \
-                     Kill it first with: sudo kill {pid}"
+            // PID must be positive. PID 0 would signal the entire process group,
+            // and negative PIDs signal process groups by absolute value.
+            if pid <= 0 {
+                eprintln!(
+                    "{} invalid PID {pid} in PID file, cleaning up stale files",
+                    "warn:".yellow()
                 );
+                let _ = std::fs::remove_file(&pid_path);
+                if socket_path.exists() {
+                    let _ = std::fs::remove_file(&socket_path);
+                }
+                return Ok(());
             }
 
-            if alive {
+            // Check if process is alive. kill(pid, 0) returns:
+            //   0    — process exists and we can signal it
+            //  -1/EPERM — process exists but owned by another user
+            //  -1/ESRCH — process does not exist (PID is stale)
+            let ret = unsafe { libc::kill(pid, 0) };
+            if ret == 0 {
+                // Process is alive and we can signal it
                 // Verify this is actually a devproxy process, not a recycled PID
                 if !is_devproxy_process(pid) {
                     eprintln!(
@@ -119,6 +125,7 @@ fn kill_stale_daemon() -> Result<()> {
                         "{} killing stale daemon (pid: {pid})...",
                         "info:".cyan()
                     );
+                    let mut killed = false;
                     if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
                         let err = std::io::Error::last_os_error();
                         eprintln!(
@@ -133,24 +140,40 @@ fn kill_stale_daemon() -> Result<()> {
                             );
                         }
                     } else {
-                        // Wait briefly for graceful shutdown
+                        // SIGTERM succeeded -- wait briefly for graceful shutdown
                         std::thread::sleep(Duration::from_millis(500));
-                        // Check if still alive, send SIGKILL
-                        if unsafe { libc::kill(pid, 0) } == 0
-                            && unsafe { libc::kill(pid, libc::SIGKILL) } != 0
-                        {
+                        if unsafe { libc::kill(pid, 0) } != 0 {
+                            // Process is gone after SIGTERM
+                            killed = true;
+                        } else if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+                            // SIGKILL succeeded
+                            std::thread::sleep(Duration::from_millis(200));
+                            killed = true;
+                        } else {
                             let err = std::io::Error::last_os_error();
                             eprintln!(
                                 "{} SIGKILL failed for pid {pid}: {err}",
                                 "warn:".yellow()
                             );
-                        } else {
-                            std::thread::sleep(Duration::from_millis(200));
                         }
                     }
-                    eprintln!("{} stale daemon killed", "ok:".green());
+                    if killed {
+                        eprintln!("{} stale daemon killed", "ok:".green());
+                    } else {
+                        eprintln!(
+                            "{} could not confirm daemon (pid: {pid}) was killed",
+                            "warn:".yellow()
+                        );
+                    }
                 }
+            } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+                // Process exists but owned by another user (e.g., root)
+                bail!(
+                    "stale daemon (pid: {pid}) is running but owned by another user. \
+                     Kill it first with: sudo kill {pid}"
+                );
             }
+            // else: process does not exist (ESRCH) -- fall through to file cleanup
         }
         let _ = std::fs::remove_file(&pid_path);
     }
@@ -164,7 +187,7 @@ fn kill_stale_daemon() -> Result<()> {
 }
 
 /// Wait for the daemon to become responsive by polling the IPC socket
-/// with an actual JSON ping/pong exchange. Returns Ok(()) if the daemon
+/// with an actual ping/pong exchange. Returns Ok(()) if the daemon
 /// responds to a Ping within the timeout, or an error if it doesn't.
 fn wait_for_daemon(timeout: Duration) -> Result<()> {
     let socket_path = Config::socket_path()?;
@@ -172,26 +195,10 @@ fn wait_for_daemon(timeout: Duration) -> Result<()> {
     let poll_interval = Duration::from_millis(100);
 
     while start.elapsed() < timeout {
-        if socket_path.exists() {
-            // Attempt a real IPC ping to verify the daemon is fully operational,
-            // not just accepting connections. The JSON format must match the
-            // canonical Request/Response protocol defined in ipc.rs.
-            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
-                use std::io::{BufRead, Write};
-                stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
-                stream.set_write_timeout(Some(Duration::from_secs(1))).ok();
-                let ping = b"{\"cmd\":\"ping\"}\n";
-                if stream.write_all(ping).is_ok() {
-                    stream.shutdown(std::net::Shutdown::Write).ok();
-                    let mut reader = std::io::BufReader::new(&stream);
-                    let mut response = String::new();
-                    if reader.read_line(&mut response).is_ok()
-                        && response.contains("pong")
-                    {
-                        return Ok(());
-                    }
-                }
-            }
+        if socket_path.exists()
+            && crate::ipc::ping_sync(&socket_path, Duration::from_secs(1))
+        {
+            return Ok(());
         }
         std::thread::sleep(poll_interval);
     }
@@ -376,8 +383,10 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         eprintln!("       echo 'address=/.{domain}/127.0.0.1' >> $(brew --prefix)/etc/dnsmasq.conf");
         eprintln!("       sudo brew services restart dnsmasq");
         eprintln!();
-        // Extract the TLD for the resolver
-        let tld = domain.rsplit('.').next().unwrap_or(domain);
+        // Extract the TLD for the resolver. rsplit('.').next() always
+        // returns Some (the last segment, or the whole string if no dot),
+        // but we already validated the domain has at least two labels above.
+        let tld = domain.rsplit('.').next().expect("validated domain has a dot");
         eprintln!("     Create resolver for .{tld} domains:");
         eprintln!("       sudo mkdir -p /etc/resolver");
         eprintln!("       echo 'nameserver 127.0.0.1' | sudo tee /etc/resolver/{tld}");
