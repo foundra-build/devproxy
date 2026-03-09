@@ -77,15 +77,20 @@ assert_line_before() {
     fi
 }
 
+# Test numbering matches the test plan. Tests 4, 7, and 8 are skipped here
+# because they require GitHub Actions execution (push, PR, workflow run)
+# and can only be verified post-merge on GitHub.
+
 CI_YML="$REPO_DIR/.github/workflows/ci.yml"
 RELEASE_YML="$REPO_DIR/.github/workflows/release.yml"
 
-# ── Test 1: CI workflow YAML is valid and triggers on PRs to main ──
+# ── Test 1: CI workflow YAML is valid and triggers on PRs and pushes to main ──
 echo ""
-echo "Test 1: CI workflow YAML is valid and triggers on PRs to main"
+echo "Test 1: CI workflow YAML is valid and triggers on PRs and pushes to main"
 
 assert_file_exists "ci.yml exists" "$CI_YML"
 assert_file_contains "triggers on pull_request" "$CI_YML" "pull_request"
+assert_file_contains "triggers on push" "$CI_YML" "push"
 assert_file_contains "targets main branch" "$CI_YML" "branches:.*main"
 assert_file_contains "has check job" "$CI_YML" "check:"
 assert_file_contains "has install-script job" "$CI_YML" "install-script:"
@@ -120,6 +125,12 @@ assert_file_contains "has x86_64-unknown-linux-gnu target" "$RELEASE_YML" "x86_6
 assert_file_contains "has aarch64-unknown-linux-gnu target" "$RELEASE_YML" "aarch64-unknown-linux-gnu"
 assert_file_contains "release job needs build" "$RELEASE_YML" "needs: build"
 assert_file_contains "uses gh release create" "$RELEASE_YML" "gh release create"
+assert_file_contains "validates version format" "$RELEASE_YML" "semver format"
+assert_file_contains "checks for existing tag" "$RELEASE_YML" "git.*tag.*list"
+assert_file_contains "pins cross to a specific tag" "$RELEASE_YML" "cross.*--tag"
+assert_file_contains "pins checkout to github.sha" "$RELEASE_YML" "github.sha"
+assert_file_contains "verifies binary count" "$RELEASE_YML" "EXPECTED_COUNT=4"
+assert_file_contains "runs tests before release build" "$RELEASE_YML" "cargo test"
 
 # ── Test 6: Release binary naming matches install script ──
 echo ""

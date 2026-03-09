@@ -1,7 +1,5 @@
 # CI/CD Pipeline Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
-
 **Goal:** Add GitHub Actions CI (tests on PRs) and release pipeline (manual dispatch, cross-compile 4 targets, create GitHub release with binaries).
 
 **Architecture:** Two workflow files: `ci.yml` runs on PRs (fmt, clippy, test, install script tests); `release.yml` runs on manual dispatch with a version input, cross-compiles for 4 targets using `cross`, creates a GitHub release, and uploads binaries named `devproxy-{TARGET}`.

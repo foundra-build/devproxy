@@ -12,8 +12,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Validate version format
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if ! echo "${RELEASE_VERSION}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Error: version '${RELEASE_VERSION}' does not match semver format (e.g., 0.0.1)" >&2
+            exit 1
+          fi
+
+      - name: Check tag does not already exist
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if git ls-remote --tags origin | grep -q "refs/tags/v${RELEASE_VERSION}$"; then
+            echo "Error: tag v${RELEASE_VERSION} already exists on remote" >&2
+            exit 1
+          fi
+          if git tag --list "v${RELEASE_VERSION}" | grep -q .; then
+            echo "Error: tag v${RELEASE_VERSION} already exists locally" >&2
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: validate
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -28,6 +59,8 @@ jobs:
             os: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -37,9 +70,13 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Run tests
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: cargo test
+
       - name: Install cross (Linux cross-compile)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --tag v0.2.5
 
       - name: Build (native)
         if: matrix.target != 'aarch64-unknown-linux-gnu'
@@ -66,19 +103,28 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Prepare binaries
+      - name: Prepare and verify binaries
         run: |
           mkdir -p release
           for dir in artifacts/devproxy-*/; do
             cp "$dir"devproxy-* release/
           done
           chmod +x release/*
+          EXPECTED_COUNT=4
+          ACTUAL_COUNT=$(ls release/ | wc -l | tr -d ' ')
+          if [ "$ACTUAL_COUNT" -ne "$EXPECTED_COUNT" ]; then
+            echo "Error: expected $EXPECTED_COUNT binaries but found $ACTUAL_COUNT" >&2
+            ls -la release/
+            exit 1
+          fi
           ls -la release/
 
       - name: Create tag
