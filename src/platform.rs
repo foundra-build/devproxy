@@ -34,6 +34,14 @@ pub fn is_socket_activation_disabled() -> bool {
 
 // ---- Plist / unit file generation ------------------------------------------
 
+/// Escape a string for safe inclusion in XML text content.
+/// Handles the three characters that are special in XML text nodes.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Generate the LaunchAgent plist XML for macOS.
 /// The plist uses Sockets to have launchd bind the port and pass the fd.
 /// If `config_dir` is Some, an `EnvironmentVariables` dict is included
@@ -43,7 +51,10 @@ pub fn generate_launchagent_plist(
     port: u16,
     config_dir: Option<&str>,
 ) -> String {
-    let env_block = match config_dir {
+    let binary_path = xml_escape(binary_path);
+    let config_dir_escaped = config_dir.map(xml_escape);
+
+    let env_block = match &config_dir_escaped {
         Some(dir) => format!(
             r#"    <key>EnvironmentVariables</key>
     <dict>
@@ -57,7 +68,7 @@ pub fn generate_launchagent_plist(
 
     // Use the same log path as Config::daemon_log_path() — inside the config dir.
     // When config_dir is overridden, log goes there; otherwise use the default.
-    let log_path = match config_dir {
+    let log_path = xml_escape(&match config_dir {
         Some(dir) => format!("{dir}/daemon.log"),
         None => {
             // Match the default from Config::config_dir() -> ~/.config/devproxy/
@@ -69,7 +80,7 @@ pub fn generate_launchagent_plist(
                 })
                 .unwrap_or_else(|| "/tmp/devproxy-daemon.log".to_string())
         }
-    };
+    });
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -532,6 +543,34 @@ fn stop_systemd_units() -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---- Query helpers ---------------------------------------------------------
+
+/// Check if the daemon is managed by a platform service manager
+/// (launchd plist exists on macOS, systemd unit exists on Linux).
+/// Returns false when socket activation is disabled (test isolation).
+pub fn is_managed() -> bool {
+    if is_socket_activation_disabled() {
+        return false;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        launchagent_plist_path()
+            .map(|p| p.exists())
+            .unwrap_or(false)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        systemd_user_dir()
+            .map(|d| d.join("devproxy.socket").exists())
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        false
+    }
 }
 
 #[cfg(test)]

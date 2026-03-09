@@ -251,6 +251,11 @@ fn spawn_daemon_directly(exe: &std::path::Path, port: u16, domain: &str) -> Resu
         cmd.env("DEVPROXY_CONFIG_DIR", dir);
     }
 
+    // The fallback path is taken because socket activation failed or was
+    // disabled. Tell the daemon not to attempt socket activation either,
+    // so it goes straight to TcpListener::bind().
+    cmd.env("DEVPROXY_NO_SOCKET_ACTIVATION", "1");
+
     use std::os::unix::process::CommandExt;
     unsafe {
         cmd.pre_exec(|| {

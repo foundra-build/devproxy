@@ -80,11 +80,11 @@ fn acquire_launchd_fds() -> Result<Option<Vec<RawFd>>> {
     let ret = unsafe { launch_activate_socket(name.as_ptr(), &mut fds_ptr, &mut count) };
 
     if ret != 0 {
-        let err = std::io::Error::from_raw_os_error(ret);
         // ESRCH means not launched by launchd — normal fallback
         if ret == libc::ESRCH {
             return Ok(None);
         }
+        let err = std::io::Error::from_raw_os_error(ret);
         bail!("launch_activate_socket failed: {err}");
     }
 
@@ -128,16 +128,20 @@ fn acquire_systemd_fds() -> Result<Option<Vec<RawFd>>> {
         return Ok(None);
     }
 
-    // Unset the env vars so child processes don't inherit them
-    // (matches sd_listen_fds(1) behavior).
-    // Safety: this function is only called once during daemon startup,
-    // before any threads are spawned, so there are no concurrent readers.
-    unsafe {
-        std::env::remove_var("LISTEN_PID");
-        std::env::remove_var("LISTEN_FDS");
-    }
+    // Note: we intentionally do NOT unset LISTEN_PID/LISTEN_FDS here.
+    // Calling std::env::remove_var is unsafe in a multi-threaded process
+    // (Rust 2024 edition), and the tokio runtime has already spawned worker
+    // threads by this point. The env var leak is harmless — the daemon runs
+    // for its entire lifetime and CLOEXEC on the fds prevents child processes
+    // from inheriting them.
 
     const SD_LISTEN_FDS_START: RawFd = 3;
+
+    // Guard against overflow: listen_fds could be absurdly large
+    if listen_fds > (RawFd::MAX - SD_LISTEN_FDS_START) as usize {
+        bail!("LISTEN_FDS value {listen_fds} is too large");
+    }
+
     let fds: Vec<RawFd> =
         (SD_LISTEN_FDS_START..SD_LISTEN_FDS_START + listen_fds as RawFd).collect();
 

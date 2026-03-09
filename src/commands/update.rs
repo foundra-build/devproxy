@@ -306,8 +306,7 @@ fn do_update(download_url: &str, exe_path: &Path, tmpfile: &Path) -> Result<()> 
     // (the existing kill-before-replace approach). For platform-managed
     // daemons, we skip this — kickstart -k / systemctl restart will handle
     // the stop+start atomically after replacement.
-    let is_platform_managed =
-        !crate::platform::is_socket_activation_disabled() && is_daemon_platform_managed();
+    let is_platform_managed = crate::platform::is_managed();
 
     if !is_platform_managed {
         let socket_path = crate::config::Config::socket_path()?;
@@ -322,27 +321,6 @@ fn do_update(download_url: &str, exe_path: &Path, tmpfile: &Path) -> Result<()> 
     replace_binary(tmpfile, exe_path)?;
 
     Ok(())
-}
-
-/// Check if the daemon is managed by a platform service manager
-/// (launchd plist exists on macOS, systemd unit exists on Linux).
-fn is_daemon_platform_managed() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        crate::platform::launchagent_plist_path()
-            .map(|p| p.exists())
-            .unwrap_or(false)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        crate::platform::systemd_user_dir()
-            .map(|d| d.join("devproxy.socket").exists())
-            .unwrap_or(false)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        false
-    }
 }
 
 #[cfg(test)]
