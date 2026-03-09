@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,7 +43,9 @@ pub async fn send_request(socket_path: &Path, request: &Request) -> Result<Respo
     writer.write_all(line.as_bytes()).await?;
     writer.shutdown().await?;
 
-    let mut buf_reader = BufReader::new(reader);
+    // Limit reads to 64KB to prevent unbounded memory allocation from
+    // malicious or malformed daemon responses.
+    let mut buf_reader = BufReader::new(reader.take(64 * 1024));
     let mut response_line = String::new();
     buf_reader.read_line(&mut response_line).await?;
 

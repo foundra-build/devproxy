@@ -1,9 +1,37 @@
 use crate::config::Config;
 use crate::proxy::cert;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
+/// Validate that the domain looks reasonable: non-empty, contains only valid
+/// DNS characters, has at least one dot, and each label is 1-63 chars.
+fn validate_domain(domain: &str) -> Result<()> {
+    if domain.is_empty() {
+        bail!("domain must not be empty");
+    }
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() < 2 {
+        bail!("domain '{domain}' must have at least two labels (e.g. 'mysite.dev')");
+    }
+    for label in &labels {
+        if label.is_empty() || label.len() > 63 {
+            bail!("domain label '{label}' must be 1-63 characters");
+        }
+        if !label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            bail!("domain label '{label}' contains invalid characters (only a-z, 0-9, - allowed)");
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            bail!("domain label '{label}' must not start or end with a hyphen");
+        }
+    }
+    Ok(())
+}
+
 pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
+    validate_domain(domain)?;
     let config = Config { domain: domain.to_string() };
 
     // Create config directory
@@ -40,11 +68,25 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         }
     }
 
-    // Generate wildcard cert if it doesn't exist
+    // Generate wildcard cert if it doesn't exist or if the domain has changed
     let tls_cert_path = Config::tls_cert_path()?;
     let tls_key_path = Config::tls_key_path()?;
 
-    if tls_cert_path.exists() && tls_key_path.exists() {
+    // Detect domain change: if an existing config has a different domain,
+    // the wildcard cert needs to be regenerated for the new domain.
+    let domain_changed = Config::load()
+        .ok()
+        .map(|existing| existing.domain != domain)
+        .unwrap_or(false);
+
+    if domain_changed && tls_cert_path.exists() {
+        eprintln!(
+            "{} domain changed, regenerating TLS certificate...",
+            "info:".cyan()
+        );
+    }
+
+    if tls_cert_path.exists() && tls_key_path.exists() && !domain_changed {
         eprintln!("{} TLS certificate already exists", "ok:".green());
     } else {
         let ca_cert_pem = std::fs::read_to_string(&ca_cert_path)?;

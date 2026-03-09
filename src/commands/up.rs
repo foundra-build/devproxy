@@ -46,6 +46,23 @@ pub fn run() -> Result<()> {
     // Write project file (slug tracking -- used by `down` and `open`)
     config::write_project_file(compose_dir, &slug)?;
 
+    // Verify daemon is running before starting containers
+    let socket_path = Config::socket_path()?;
+    if !socket_path.exists() {
+        // Clean up files we already wrote
+        let _ = std::fs::remove_file(&override_path);
+        let _ = std::fs::remove_file(compose_dir.join(".devproxy-project"));
+        bail!("daemon is not running (no socket at {}). Run `devproxy init` first.", socket_path.display());
+    }
+    if std::os::unix::net::UnixStream::connect(&socket_path).is_err() {
+        let _ = std::fs::remove_file(&override_path);
+        let _ = std::fs::remove_file(compose_dir.join(".devproxy-project"));
+        bail!(
+            "daemon is not running (could not connect to {}). Run `devproxy init` first.",
+            socket_path.display()
+        );
+    }
+
     // Run docker compose up
     let compose_file_name = compose_path
         .file_name()

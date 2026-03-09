@@ -12,7 +12,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request as HyperRequest, Response as HyperResponse};
 use router::Router;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixListener};
 
 /// Run the daemon: HTTPS proxy + Docker watcher + IPC server
@@ -33,8 +33,8 @@ pub async fn run_daemon(port: u16) -> Result<()> {
     // Set up IPC socket -- check for an already-running daemon first
     let socket_path = Config::socket_path()?;
     if socket_path.exists() {
-        // Try to connect to see if another daemon is already listening
-        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+        // Try to connect asynchronously to see if another daemon is already listening
+        if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
             bail!(
                 "another daemon appears to be running (socket {} is live). \
                  Stop it first or remove the stale socket.",
@@ -57,31 +57,17 @@ pub async fn run_daemon(port: u16) -> Result<()> {
 
     // Run all three tasks concurrently with try_join!.
     // All three loops run forever under normal operation. If any returns
-    // (which means it errored), try_join! cancels the others and propagates.
+    // an error, try_join! cancels the remaining tasks and propagates the
+    // first error immediately -- preventing a half-dead daemon.
     let r1 = router.clone();
     let r2 = router.clone();
     let r3 = router.clone();
 
-    let (proxy_res, docker_res, ipc_res) = tokio::join!(
-        https_proxy_loop(tcp_listener, tls_acceptor, r1),
-        docker::watch_events(&r2),
-        ipc_server_loop(ipc_listener, r3),
-    );
-
-    // Report all errors, not just the first
-    if let Err(e) = &proxy_res {
-        eprintln!("HTTPS proxy task failed: {e:#}");
-    }
-    if let Err(e) = &docker_res {
-        eprintln!("Docker watcher task failed: {e:#}");
-    }
-    if let Err(e) = &ipc_res {
-        eprintln!("IPC server task failed: {e:#}");
-    }
-
-    proxy_res.context("HTTPS proxy task failed")?;
-    docker_res.context("Docker watcher task failed")?;
-    ipc_res.context("IPC server task failed")?;
+    tokio::try_join!(
+        async { https_proxy_loop(tcp_listener, tls_acceptor, r1).await.context("HTTPS proxy task failed") },
+        async { docker::watch_events(&r2).await.context("Docker watcher task failed") },
+        async { ipc_server_loop(ipc_listener, r3).await.context("IPC server task failed") },
+    )?;
 
     Ok(())
 }
@@ -104,7 +90,9 @@ async fn handle_ipc_connection(
     router: &Router,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
-    let mut buf_reader = BufReader::new(reader);
+    // Limit reads to 64KB to prevent unbounded memory allocation from
+    // malicious or malformed IPC messages.
+    let mut buf_reader = BufReader::new(reader.take(64 * 1024));
     let mut line = String::new();
     buf_reader.read_line(&mut line).await?;
 
