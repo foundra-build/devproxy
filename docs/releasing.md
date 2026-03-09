@@ -10,6 +10,8 @@ Pull requests to `main` automatically run:
 
 ## Creating a Release
 
+Before releasing, ensure CI is green on `main` — all checks (fmt, clippy, tests, install script) must pass.
+
 Releases are created manually via GitHub Actions:
 
 1. Go to **Actions** → **Release** → **Run workflow**

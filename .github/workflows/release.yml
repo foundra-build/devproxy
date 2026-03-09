@@ -50,7 +50,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-13
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-unknown-linux-gnu
@@ -71,7 +71,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Run tests
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo test
 
       - name: Install cross (Linux cross-compile)
@@ -126,6 +126,15 @@ jobs:
             exit 1
           fi
           ls -la release/
+
+      - name: Re-check tag does not exist
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if git ls-remote --tags origin | grep -q "refs/tags/v${RELEASE_VERSION}$"; then
+            echo "Error: tag v${RELEASE_VERSION} was created since validation (concurrent release?)" >&2
+            exit 1
+          fi
 
       - name: Create tag
         env:

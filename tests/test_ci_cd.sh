@@ -7,35 +7,6 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PASS=0
 FAIL=0
 
-assert_eq() {
-    desc="$1"
-    expected="$2"
-    actual="$3"
-    if [ "$expected" = "$actual" ]; then
-        echo "  PASS: $desc"
-        PASS=$((PASS + 1))
-    else
-        echo "  FAIL: $desc (expected '$expected', got '$actual')"
-        FAIL=$((FAIL + 1))
-    fi
-}
-
-assert_contains() {
-    desc="$1"
-    haystack="$2"
-    needle="$3"
-    case "$haystack" in
-        *"$needle"*)
-            echo "  PASS: $desc"
-            PASS=$((PASS + 1))
-            ;;
-        *)
-            echo "  FAIL: $desc (expected to contain '$needle')"
-            FAIL=$((FAIL + 1))
-            ;;
-    esac
-}
-
 assert_file_exists() {
     desc="$1"
     filepath="$2"
@@ -48,11 +19,26 @@ assert_file_exists() {
     fi
 }
 
+# Searches for a pattern in a file using grep (regex by default).
 assert_file_contains() {
     desc="$1"
     filepath="$2"
     needle="$3"
     if grep -q "$needle" "$filepath" 2>/dev/null; then
+        echo "  PASS: $desc"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL: $desc (file does not contain '$needle')"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# Searches for a fixed (literal) string in a file.
+assert_file_contains_fixed() {
+    desc="$1"
+    filepath="$2"
+    needle="$3"
+    if grep -qF "$needle" "$filepath" 2>/dev/null; then
         echo "  PASS: $desc"
         PASS=$((PASS + 1))
     else
@@ -68,7 +54,13 @@ assert_line_before() {
     second="$4"
     first_line=$(grep -n "$first" "$filepath" 2>/dev/null | head -1 | cut -d: -f1)
     second_line=$(grep -n "$second" "$filepath" 2>/dev/null | head -1 | cut -d: -f1)
-    if [ -n "$first_line" ] && [ -n "$second_line" ] && [ "$first_line" -lt "$second_line" ]; then
+    if [ -z "$first_line" ]; then
+        echo "  FAIL: $desc (pattern '$first' not found in file)"
+        FAIL=$((FAIL + 1))
+    elif [ -z "$second_line" ]; then
+        echo "  FAIL: $desc (pattern '$second' not found in file)"
+        FAIL=$((FAIL + 1))
+    elif [ "$first_line" -lt "$second_line" ]; then
         echo "  PASS: $desc"
         PASS=$((PASS + 1))
     else
@@ -99,17 +91,18 @@ assert_file_contains "has install-script job" "$CI_YML" "install-script:"
 echo ""
 echo "Test 2: CI check job runs fmt, clippy, test in correct order"
 
-assert_file_contains "has cargo fmt --check" "$CI_YML" "cargo fmt -- --check"
-assert_file_contains "has cargo clippy with -D warnings" "$CI_YML" "cargo clippy --all-targets -- -D warnings"
-assert_file_contains "has cargo test" "$CI_YML" "cargo test"
+assert_file_contains_fixed "has cargo fmt --check" "$CI_YML" "cargo fmt -- --check"
+assert_file_contains_fixed "has cargo clippy with -D warnings" "$CI_YML" "cargo clippy --all-targets -- -D warnings"
+assert_file_contains_fixed "has cargo test" "$CI_YML" "cargo test"
 assert_line_before "fmt before clippy" "$CI_YML" "cargo fmt" "cargo clippy"
 assert_line_before "clippy before test" "$CI_YML" "cargo clippy" "cargo test"
 
-# ── Test 3: CI install-script job runs test_install.sh ──
+# ── Test 3: CI install-script job runs test_install.sh and test_ci_cd.sh ──
 echo ""
-echo "Test 3: CI install-script job runs test_install.sh"
+echo "Test 3: CI install-script job runs test_install.sh and test_ci_cd.sh"
 
 assert_file_contains "install-script job runs test_install.sh" "$CI_YML" "tests/test_install.sh"
+assert_file_contains "CI runs test_ci_cd.sh" "$CI_YML" "tests/test_ci_cd.sh"
 
 # ── Test 5: Release workflow YAML is valid and uses manual dispatch ──
 echo ""
@@ -131,21 +124,23 @@ assert_file_contains "pins cross to a specific tag" "$RELEASE_YML" "cross.*--tag
 assert_file_contains "pins checkout to github.sha" "$RELEASE_YML" "github.sha"
 assert_file_contains "verifies binary count" "$RELEASE_YML" "EXPECTED_COUNT=4"
 assert_file_contains "runs tests before release build" "$RELEASE_YML" "cargo test"
+assert_file_contains "re-checks tag before creation" "$RELEASE_YML" "Re-check.*tag"
+assert_file_contains "uses macos-13 for x86_64-apple-darwin" "$RELEASE_YML" "macos-13"
 
 # ── Test 6: Release binary naming matches install script ──
 echo ""
 echo "Test 6: Release binary naming matches install script"
 
-assert_file_contains "release renames binary with target" "$RELEASE_YML" 'devproxy-\${{ matrix.target }}'
-assert_file_contains "install.sh uses BINARY_NAME with TARGET" "$REPO_DIR/install.sh" 'BINARY_NAME="devproxy-${TARGET}"'
+assert_file_contains_fixed "release renames binary with target" "$RELEASE_YML" 'devproxy-${{ matrix.target }}'
+assert_file_contains_fixed "install.sh uses BINARY_NAME with TARGET" "$REPO_DIR/install.sh" 'BINARY_NAME="devproxy-${TARGET}"'
 
 # ── Test 9: README includes version pinning documentation ──
 echo ""
 echo "Test 9: README includes version pinning documentation"
 
 README="$REPO_DIR/README.md"
-assert_file_contains "README has install command" "$README" "curl -fsSL https://raw.githubusercontent.com/foundra-build/devproxy/main/install.sh | sh"
-assert_file_contains "README has version pinning" "$README" "DEVPROXY_VERSION="
+assert_file_contains_fixed "README has install command" "$README" "curl -fsSL https://raw.githubusercontent.com/foundra-build/devproxy/main/install.sh | sh"
+assert_file_contains_fixed "README has version pinning" "$README" "DEVPROXY_VERSION="
 
 # ── Test 10: Release documentation exists and is accurate ──
 echo ""
@@ -153,12 +148,13 @@ echo "Test 10: Release documentation exists and is accurate"
 
 RELDOC="$REPO_DIR/docs/releasing.md"
 assert_file_exists "docs/releasing.md exists" "$RELDOC"
-assert_file_contains "Mentions x86_64-apple-darwin" "$RELDOC" "x86_64-apple-darwin"
-assert_file_contains "Mentions aarch64-apple-darwin" "$RELDOC" "aarch64-apple-darwin"
-assert_file_contains "Mentions x86_64-unknown-linux-gnu" "$RELDOC" "x86_64-unknown-linux-gnu"
-assert_file_contains "Mentions aarch64-unknown-linux-gnu" "$RELDOC" "aarch64-unknown-linux-gnu"
+assert_file_contains_fixed "Mentions x86_64-apple-darwin" "$RELDOC" "x86_64-apple-darwin"
+assert_file_contains_fixed "Mentions aarch64-apple-darwin" "$RELDOC" "aarch64-apple-darwin"
+assert_file_contains_fixed "Mentions x86_64-unknown-linux-gnu" "$RELDOC" "x86_64-unknown-linux-gnu"
+assert_file_contains_fixed "Mentions aarch64-unknown-linux-gnu" "$RELDOC" "aarch64-unknown-linux-gnu"
 assert_file_contains "Mentions manual release process" "$RELDOC" "Run workflow"
-assert_file_contains "Mentions DEVPROXY_VERSION" "$RELDOC" "DEVPROXY_VERSION"
+assert_file_contains_fixed "Mentions DEVPROXY_VERSION" "$RELDOC" "DEVPROXY_VERSION"
+assert_file_contains "Mentions CI must be green before release" "$RELDOC" "CI.*green\|CI.*pass"
 
 # ── Summary ──
 echo ""
