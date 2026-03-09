@@ -129,7 +129,10 @@ pub fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<tokio_rustls
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
-/// Trust the CA certificate in the system keychain (macOS only for now)
+/// Trust the CA certificate in the system keychain.
+///
+/// Supports macOS (security add-trusted-cert) and Linux (update-ca-certificates).
+/// Warns on other platforms where automatic trust is not implemented.
 pub fn trust_ca_in_system(ca_cert_path: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -147,6 +150,8 @@ pub fn trust_ca_in_system(ca_cert_path: &Path) -> Result<()> {
         if !status.success() {
             anyhow::bail!("failed to trust CA cert. You may need to run with sudo.");
         }
+
+        return Ok(());
     }
 
     #[cfg(target_os = "linux")]
@@ -160,9 +165,19 @@ pub fn trust_ca_in_system(ca_cert_path: &Path) -> Result<()> {
         if !status.success() {
             anyhow::bail!("failed to update CA certificates");
         }
+
+        return Ok(());
     }
 
-    Ok(())
+    #[allow(unreachable_code)]
+    {
+        eprintln!(
+            "warning: automatic CA trust is not supported on this platform. \
+             Please manually trust: {}",
+            ca_cert_path.display()
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

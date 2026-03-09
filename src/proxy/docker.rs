@@ -96,6 +96,11 @@ pub async fn load_routes(router: &Router) -> Result<()> {
         .await
         .context("failed to run docker ps")?;
 
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("docker ps failed (exit {}): {stderr}", output.status);
+    }
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         let container_id = line.trim();

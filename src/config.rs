@@ -157,11 +157,26 @@ pub fn find_compose_file(dir: &Path) -> Result<PathBuf> {
     bail!("no docker-compose.yml found in {}", dir.display())
 }
 
-/// Write the port-override compose file
+/// Write the port-override compose file.
+///
+/// The service name is validated to contain only alphanumeric, hyphen, and
+/// underscore characters before being interpolated into YAML, preventing
+/// injection of arbitrary YAML content.
 pub fn write_override_file(dir: &Path, service_name: &str, host_port: u16, container_port: u16) -> Result<PathBuf> {
+    // Validate service name to prevent YAML injection
+    if service_name.is_empty()
+        || !service_name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!(
+            "invalid service name '{service_name}': must contain only alphanumeric, hyphen, or underscore characters"
+        );
+    }
+
     let path = dir.join(".devproxy-override.yml");
     let content = format!(
-        "services:\n  {service_name}:\n    ports:\n      - \"{host_port}:{container_port}\"\n"
+        "services:\n  {service_name}:\n    ports:\n      - \"127.0.0.1:{host_port}:{container_port}\"\n"
     );
     std::fs::write(&path, &content)?;
     Ok(path)

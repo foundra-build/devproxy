@@ -603,13 +603,16 @@ fn test_daemon_restart_rebuilds_routes() {
 
     std::thread::sleep(Duration::from_secs(2));
 
-    // Kill the daemon (not the container) -- DaemonGuard::drop kills process and cleans config_dir,
-    // but we need the config_dir to survive for the new daemon. So we kill manually.
+    // Kill the daemon (not the container) -- we need the config_dir to survive
+    // for the new daemon, so take ownership and kill without dropping the guard.
     let mut daemon = daemon;
     let _ = daemon.child.kill();
     let _ = daemon.child.wait();
-    // Prevent DaemonGuard::drop from deleting config_dir by forgetting it
-    std::mem::forget(daemon);
+    // Clear the config_dir path so Drop won't delete it (the second daemon's
+    // guard will handle cleanup). Setting it to empty means remove_dir_all is
+    // harmless (it will fail on "").
+    daemon.config_dir = PathBuf::new();
+    drop(daemon);
 
     std::thread::sleep(Duration::from_millis(500));
 
