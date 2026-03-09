@@ -10,7 +10,6 @@ main() {
     construct_url
     create_install_dir
     download_binary
-    make_executable
     verify_installation
     echo "devproxy installed successfully to ${DEVPROXY_INSTALL_DIR}/devproxy"
 }
@@ -50,6 +49,10 @@ create_install_dir() {
             echo "Try running with sudo or set DEVPROXY_INSTALL_DIR to a writable location." >&2
             exit 1
         fi
+    elif [ ! -w "$DEVPROXY_INSTALL_DIR" ]; then
+        echo "Error: install directory ${DEVPROXY_INSTALL_DIR} is not writable" >&2
+        echo "Try running with sudo or set DEVPROXY_INSTALL_DIR to a writable location." >&2
+        exit 1
     fi
 }
 
@@ -63,7 +66,7 @@ download_binary() {
             exit 1
         fi
     elif command -v wget >/dev/null 2>&1; then
-        if ! wget -q -O "$TMPFILE" "$DOWNLOAD_URL" 2>/dev/null; then
+        if ! wget -q -O "$TMPFILE" "$DOWNLOAD_URL"; then
             echo "Error: failed to download devproxy from ${DOWNLOAD_URL}" >&2
             exit 1
         fi
@@ -72,12 +75,11 @@ download_binary() {
         exit 1
     fi
 
-    mv "$TMPFILE" "${DEVPROXY_INSTALL_DIR}/devproxy"
+    # Use install -m to atomically place the binary with correct permissions,
+    # avoiding a window where the binary exists but is not yet executable.
+    install -m 755 "$TMPFILE" "${DEVPROXY_INSTALL_DIR}/devproxy"
+    rm -f "$TMPFILE"
     trap - EXIT
-}
-
-make_executable() {
-    chmod +x "${DEVPROXY_INSTALL_DIR}/devproxy"
 }
 
 verify_installation() {
