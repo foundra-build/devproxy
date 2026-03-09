@@ -1243,6 +1243,8 @@ git commit -m "fix: add DEVPROXY_NO_SOCKET_ACTIVATION to test_reinit for test is
 
 This test installs a real LaunchAgent with an ephemeral port, verifies the daemon starts and responds to IPC, then tears it down. It is `#[ignore]` and `#[cfg(target_os = "macos")]` so it only runs explicitly.
 
+**Critical safety guard:** The test checks whether a production plist already exists at `~/Library/LaunchAgents/com.devproxy.daemon.plist` before doing anything. If found, the test skips with a clear message rather than destroying the developer's real LaunchAgent. The plist path is hardcoded to `com.devproxy.daemon` (the production label), so installing a test plist would `bootout` and overwrite any existing installation. Skipping is the safest option — a developer who has devproxy installed can still verify the test by temporarily unloading their agent first.
+
 ```rust
 /// macOS-only: verify socket activation via launchd with an ephemeral port.
 /// Installs a real LaunchAgent plist, waits for the daemon to respond,
@@ -1251,6 +1253,22 @@ This test installs a real LaunchAgent with an ephemeral port, verifies the daemo
 #[ignore]
 #[cfg(target_os = "macos")]
 fn test_launchd_socket_activation() {
+    // Safety: skip if a production LaunchAgent plist already exists.
+    // Installing a test plist would bootout and overwrite the real one,
+    // destroying the developer's existing devproxy installation.
+    let home = std::env::var("HOME").unwrap();
+    let production_plist = format!(
+        "{home}/Library/LaunchAgents/com.devproxy.daemon.plist"
+    );
+    if std::path::Path::new(&production_plist).exists() {
+        eprintln!(
+            "SKIPPED: production LaunchAgent plist exists at {production_plist}. \
+             Unload it first (launchctl bootout gui/$(id -u)/com.devproxy.daemon) \
+             to run this test."
+        );
+        return;
+    }
+
     let config_dir = create_test_config_dir("launchd");
     let daemon_port = find_free_port();
 
@@ -1864,3 +1882,5 @@ git commit -m "style: cargo fmt"
 8. **KeepAlive=true in plist**: Ensures launchd restarts the daemon if it crashes. `kill_stale_daemon` uses `launchctl bootout` (via `stop_daemon`) instead of SIGTERM to avoid launchd immediately restarting the process.
 
 9. **No new Cargo dependencies**: Uses `libc` (already a dependency) for `launch_activate_socket` FFI and standard library for systemd env var parsing.
+
+10. **LaunchAgent test skip-if-existing guard**: The macOS launchd integration test (Task 8) checks for an existing production plist at `~/Library/LaunchAgents/com.devproxy.daemon.plist` and skips if found. Because the plist path and launchd label are global (not scoped by `DEVPROXY_CONFIG_DIR`), installing a test plist would `bootout` and overwrite the developer's real LaunchAgent. Skipping is simpler than parameterizing the label (which would thread a label argument through `generate_launchagent_plist`, `launchagent_plist_path`, `bootout_launchagent`, `install_launchagent`, and `launch_activate_socket`'s socket name). The test is already `#[ignore]`, so the skip only affects developers who have devproxy installed AND explicitly opt in.
