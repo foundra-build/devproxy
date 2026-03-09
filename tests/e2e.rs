@@ -794,14 +794,18 @@ fn test_up_fails_fast_with_dead_daemon() {
     )
     .unwrap();
 
-    // Create a stale socket that no daemon is listening on.
-    // Bind a Unix socket then immediately drop it to leave the file.
+    // Create a stale socket file that no daemon is listening on.
+    // Bind a Unix socket then immediately drop it -- the file remains on disk.
     let socket_path = config_dir.join("devproxy.sock");
     {
         let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
         drop(listener);
-        // Socket file exists but nothing is listening
     }
+    // Verify the socket file persists after the listener is dropped
+    assert!(
+        socket_path.exists(),
+        "socket file should remain after UnixListener drop"
+    );
 
     let start = std::time::Instant::now();
     let output = Command::new(devproxy_bin())
@@ -825,7 +829,7 @@ fn test_up_fails_fast_with_dead_daemon() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("not running") || stderr.contains("could not connect"),
+        stderr.contains("not running") || stderr.contains("no response"),
         "should report daemon not running: {stderr}"
     );
 
@@ -861,6 +865,8 @@ fn test_daemon_writes_pid_file() {
 
 /// Verify re-init kills the stale daemon process.
 /// Leaves daemon1 running and lets init's kill_stale_daemon handle the kill.
+/// We hold onto the Child handle in a local variable for cleanup rather than
+/// leaking it with std::mem::forget.
 #[test]
 #[ignore]
 fn test_reinit_kills_stale_daemon() {
@@ -880,19 +886,15 @@ fn test_reinit_kills_stale_daemon() {
     assert_eq!(saved_pid, pid1, "PID file should match daemon PID");
 
     // Detach daemon1 from the guard so Drop does NOT kill it --
-    // we want init's kill_stale_daemon to handle that.
+    // we want init's kill_stale_daemon to handle that. Replace the child
+    // with a dummy so the guard's Drop is harmless, and keep the real
+    // child handle for cleanup at end of test.
     daemon1.config_dir = PathBuf::new();
-    // We must NOT call child.kill() here. Instead, leak the Child so
-    // the daemon stays alive for init to find and kill.
-    let child = std::mem::replace(
+    let mut original_child = std::mem::replace(
         &mut daemon1.child,
-        // Replace with a dummy child that we can safely drop.
-        // Spawn a trivial process that exits immediately.
         Command::new("true").spawn().unwrap(),
     );
     drop(daemon1);
-    // Forget the original child so its Drop doesn't kill the daemon.
-    std::mem::forget(child);
 
     // Verify the old daemon is still alive
     assert_eq!(
@@ -934,6 +936,9 @@ fn test_reinit_kills_stale_daemon() {
         0,
         "old daemon (pid {pid1}) should be dead after re-init"
     );
+
+    // Reap the original child to avoid zombie (init already killed it)
+    let _ = original_child.wait();
 
     // New PID should be different from old one
     let new_pid_str = std::fs::read_to_string(&pid_path).unwrap();

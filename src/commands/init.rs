@@ -44,7 +44,12 @@ fn is_devproxy_process(pid: i32) -> bool {
         match output {
             Ok(out) if out.status.success() => {
                 let comm = String::from_utf8_lossy(&out.stdout);
-                comm.trim().ends_with("devproxy")
+                // Exact match on basename to avoid false positives (e.g., "my-devproxy")
+                comm.trim()
+                    .rsplit('/')
+                    .next()
+                    .map(|name| name == "devproxy")
+                    .unwrap_or(false)
             }
             _ => false,
         }
@@ -71,6 +76,15 @@ fn is_devproxy_process(pid: i32) -> bool {
 /// Kill a stale daemon process. Reads PID from the PID file, validates it
 /// is actually a devproxy process (to avoid PID reuse races), then sends
 /// SIGTERM/SIGKILL. Also removes stale socket and PID files.
+///
+/// # Residual TOCTOU race
+///
+/// There is a small window between `is_devproxy_process(pid)` returning true
+/// and the SIGTERM being sent where the process could die and the OS could
+/// recycle the PID. In practice this is extremely unlikely: PIDs cycle through
+/// a large range and the window is microseconds. The process-name check makes
+/// accidental kills vanishingly improbable -- the recycled PID would also need
+/// to be named "devproxy".
 fn kill_stale_daemon() -> Result<()> {
     let pid_path = Config::pid_path()?;
     let socket_path = Config::socket_path()?;
@@ -86,15 +100,10 @@ fn kill_stale_daemon() -> Result<()> {
                 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
 
             if alive_but_no_perms {
-                eprintln!(
-                    "{} stale daemon (pid: {pid}) is running but owned by another user.",
-                    "warn:".yellow()
+                bail!(
+                    "stale daemon (pid: {pid}) is running but owned by another user. \
+                     Kill it first with: sudo kill {pid}"
                 );
-                eprintln!(
-                    "  try: sudo kill {pid}"
-                );
-                // Don't remove PID/socket files -- the daemon is still running
-                return Ok(());
             }
 
             if alive {
@@ -110,13 +119,34 @@ fn kill_stale_daemon() -> Result<()> {
                         "{} killing stale daemon (pid: {pid})...",
                         "info:".cyan()
                     );
-                    unsafe { libc::kill(pid, libc::SIGTERM); }
-                    // Wait briefly for graceful shutdown
-                    std::thread::sleep(Duration::from_millis(500));
-                    // Check if still alive, send SIGKILL
-                    if unsafe { libc::kill(pid, 0) } == 0 {
-                        unsafe { libc::kill(pid, libc::SIGKILL); }
-                        std::thread::sleep(Duration::from_millis(200));
+                    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+                        let err = std::io::Error::last_os_error();
+                        eprintln!(
+                            "{} SIGTERM failed for pid {pid}: {err}",
+                            "warn:".yellow()
+                        );
+                        // EPERM means we can't signal it -- bail with guidance
+                        if err.raw_os_error() == Some(libc::EPERM) {
+                            bail!(
+                                "cannot kill stale daemon (pid: {pid}): permission denied. \
+                                 Try: sudo kill {pid}"
+                            );
+                        }
+                    } else {
+                        // Wait briefly for graceful shutdown
+                        std::thread::sleep(Duration::from_millis(500));
+                        // Check if still alive, send SIGKILL
+                        if unsafe { libc::kill(pid, 0) } == 0
+                            && unsafe { libc::kill(pid, libc::SIGKILL) } != 0
+                        {
+                            let err = std::io::Error::last_os_error();
+                            eprintln!(
+                                "{} SIGKILL failed for pid {pid}: {err}",
+                                "warn:".yellow()
+                            );
+                        } else {
+                            std::thread::sleep(Duration::from_millis(200));
+                        }
                     }
                     eprintln!("{} stale daemon killed", "ok:".green());
                 }
@@ -144,7 +174,8 @@ fn wait_for_daemon(timeout: Duration) -> Result<()> {
     while start.elapsed() < timeout {
         if socket_path.exists() {
             // Attempt a real IPC ping to verify the daemon is fully operational,
-            // not just accepting connections.
+            // not just accepting connections. The JSON format must match the
+            // canonical Request/Response protocol defined in ipc.rs.
             if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
                 use std::io::{BufRead, Write};
                 stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
@@ -183,6 +214,10 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     let ca_cert_path = Config::ca_cert_path()?;
     let ca_key_path = Config::ca_key_path()?;
 
+    // Track whether CA trust needs manual action, so we can conditionally
+    // print trust instructions in "Next steps".
+    let mut ca_trust_needed = false;
+
     if ca_cert_path.exists() && ca_key_path.exists() {
         eprintln!("{} CA certificate already exists", "ok:".green());
     } else {
@@ -197,6 +232,7 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         match cert::trust_ca_in_system(&ca_cert_path) {
             Ok(()) => eprintln!("{} CA trusted in system keychain", "ok:".green()),
             Err(e) => {
+                ca_trust_needed = true;
                 eprintln!(
                     "{} could not trust CA automatically: {e}",
                     "warn:".yellow()
@@ -352,20 +388,30 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     }
     eprintln!();
 
-    // CA trust reminder
-    eprintln!("  {} Trust the CA certificate (if not done above)", "2.".bold());
-    eprintln!("     CA cert: {}", ca_cert_path.display().to_string().cyan());
-    #[cfg(target_os = "macos")]
-    eprintln!(
-        "     sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
-        ca_cert_path.display()
-    );
-    eprintln!();
+    // CA trust reminder -- only shown if trust was not already successful
+    let mut step = 2;
+    if ca_trust_needed {
+        eprintln!("  {} Trust the CA certificate", format!("{step}.").bold());
+        eprintln!("     CA cert: {}", ca_cert_path.display().to_string().cyan());
+        #[cfg(target_os = "macos")]
+        eprintln!(
+            "     sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+            ca_cert_path.display()
+        );
+        #[cfg(target_os = "linux")]
+        eprintln!(
+            "     sudo cp {} /usr/local/share/ca-certificates/devproxy-ca.crt && sudo update-ca-certificates",
+            ca_cert_path.display()
+        );
+        eprintln!();
+        step += 1;
+    }
 
     // Project setup
-    eprintln!("  {} Add a devproxy.port label to your docker-compose.yml", "3.".bold());
+    eprintln!("  {} Add a devproxy.port label to your docker-compose.yml", format!("{step}.").bold());
     eprintln!();
-    eprintln!("  {} Run: devproxy up", "4.".bold());
+    step += 1;
+    eprintln!("  {} Run: devproxy up", format!("{step}.").bold());
 
     Ok(())
 }

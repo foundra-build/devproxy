@@ -57,23 +57,23 @@ pub fn run() -> Result<()> {
     }
 
     // Send an actual IPC ping with a timeout to verify the daemon is
-    // responsive, not just that a stale socket file exists.
+    // responsive, not just that a stale socket file exists. The JSON format
+    // must match the canonical Request/Response protocol defined in ipc.rs.
     {
         use std::io::{BufRead, Write};
         let ping_timeout = std::time::Duration::from_secs(2);
         let daemon_alive = (|| -> bool {
-            let stream = match std::os::unix::net::UnixStream::connect(&socket_path) {
+            let mut stream = match std::os::unix::net::UnixStream::connect(&socket_path) {
                 Ok(s) => s,
                 Err(_) => return false,
             };
             stream.set_read_timeout(Some(ping_timeout)).ok();
             stream.set_write_timeout(Some(ping_timeout)).ok();
-            if stream.try_clone().ok().and_then(|mut w| {
-                w.write_all(b"{\"cmd\":\"ping\"}\n").ok()?;
-                w.shutdown(std::net::Shutdown::Write).ok()
-            }).is_none() {
+            let ping = b"{\"cmd\":\"ping\"}\n";
+            if stream.write_all(ping).is_err() {
                 return false;
             }
+            stream.shutdown(std::net::Shutdown::Write).ok();
             let mut reader = std::io::BufReader::new(&stream);
             let mut response = String::new();
             reader.read_line(&mut response).is_ok() && response.contains("pong")
