@@ -271,9 +271,27 @@ done
 # ============================================================
 echo "=== Test 2: Unsupported platform error ==="
 
+# Helper for unsupported-platform tests: runs the harness directly
+# without suppressing stderr, so error messages can be captured.
+run_detection_with_stderr() {
+    _uname_dir="$1"
+    _harness="$TMPDIR_ROOT/harness-unsup-$$.sh"
+    sed 's/^main$//' "$INSTALL_SCRIPT" > "$_harness"
+    cat >> "$_harness" <<'HARNESS'
+detect_platform
+HARNESS
+    PATH="$_uname_dir:$PATH" \
+        DEVPROXY_INSTALL_BASE_URL="https://example.com" \
+        DEVPROXY_VERSION="latest" \
+        sh "$_harness" 2>&1
+    _rc=$?
+    rm -f "$_harness"
+    return $_rc
+}
+
 # Unsupported OS
 wrapper_dir="$(make_uname_wrapper "FreeBSD" "x86_64")"
-if output="$(run_detection "$wrapper_dir" 2>&1)"; then
+if output="$(run_detection_with_stderr "$wrapper_dir")"; then
     fail "FreeBSD should fail but exited 0"
 else
     if echo "$output" | grep -qi "unsupported"; then
@@ -285,7 +303,7 @@ fi
 
 # Unsupported arch
 wrapper_dir="$(make_uname_wrapper "Linux" "mips")"
-if output="$(run_detection "$wrapper_dir" 2>&1)"; then
+if output="$(run_detection_with_stderr "$wrapper_dir")"; then
     fail "mips should fail but exited 0"
 else
     if echo "$output" | grep -qi "unsupported"; then
