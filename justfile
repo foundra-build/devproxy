@@ -32,3 +32,7 @@ fmt-check:
 # Run e2e tests (requires Docker)
 e2e:
     cargo test --test e2e -- --include-ignored --nocapture
+
+# Run install script tests
+test-install:
+    sh tests/test_install.sh
