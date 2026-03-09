@@ -320,6 +320,13 @@ fn do_update(download_url: &str, exe_path: &Path, tmpfile: &Path) -> Result<()> 
 
     replace_binary(tmpfile, exe_path)?;
 
+    // Also update the dedicated daemon binary so that the launchd/systemd
+    // managed daemon picks up the new version on restart.
+    let daemon_bin = crate::config::Config::daemon_binary_path()?;
+    if daemon_bin.exists() {
+        super::init::install_daemon_binary(exe_path, &daemon_bin)?;
+    }
+
     Ok(())
 }
 

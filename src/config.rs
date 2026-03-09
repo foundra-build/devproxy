@@ -57,6 +57,24 @@ impl Config {
         Ok(Self::config_dir()?.join("daemon.log"))
     }
 
+    /// Returns the path to the dedicated daemon binary.
+    ///
+    /// The daemon binary is stored separately from the CLI binary so that
+    /// launchd's KeepAlive monitoring of the daemon path does not interfere
+    /// with normal CLI invocations (e.g., `devproxy --version`).
+    ///
+    /// Path: `~/.local/share/devproxy/devproxy-daemon`
+    /// Respects `DEVPROXY_DATA_DIR` env var for test isolation.
+    pub fn daemon_binary_path() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("DEVPROXY_DATA_DIR") {
+            return Ok(PathBuf::from(dir).join("devproxy-daemon"));
+        }
+        let dir = dirs::data_dir()
+            .context("could not determine data directory")?
+            .join("devproxy");
+        Ok(dir.join("devproxy-daemon"))
+    }
+
     pub fn save(&self) -> Result<()> {
         let dir = Self::config_dir()?;
         std::fs::create_dir_all(&dir)?;
