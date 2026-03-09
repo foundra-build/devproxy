@@ -93,9 +93,15 @@ download_binary() {
     fi
     # On macOS, clear quarantine attributes and ad-hoc sign the binary
     # to prevent Gatekeeper from killing it on first run.
+    # These are best-effort: if they fail (e.g., signing tools not available),
+    # the binary is still installed and may work; warn but do not abort.
     if [ "$(uname -s)" = "Darwin" ]; then
-        xattr -cr "${DEVPROXY_INSTALL_DIR}/devproxy"
-        codesign --force --sign - "${DEVPROXY_INSTALL_DIR}/devproxy"
+        if ! xattr -cr "${DEVPROXY_INSTALL_DIR}/devproxy" 2>/dev/null; then
+            echo "Warning: failed to clear quarantine attributes; Gatekeeper may block the binary" >&2
+        fi
+        if ! codesign --force --sign - "${DEVPROXY_INSTALL_DIR}/devproxy" 2>/dev/null; then
+            echo "Warning: failed to ad-hoc sign binary; Gatekeeper may kill the binary on first run" >&2
+        fi
     fi
     rm -f "$TMPFILE"
     trap - EXIT

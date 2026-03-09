@@ -378,26 +378,27 @@ assert_line_before() {
     fi
 }
 
-# Test 1 (plan): Darwin guard present
+# Darwin guard present
 assert_file_contains "$INSTALL_SCRIPT" 'uname -s.*Darwin\|Darwin' "install.sh contains Darwin guard"
 assert_file_contains "$INSTALL_SCRIPT" 'xattr -cr' "install.sh contains xattr -cr"
 assert_file_contains "$INSTALL_SCRIPT" 'codesign --force --sign -' "install.sh contains codesign"
 
-# Test 2 (plan): Signing happens after chmod
+# Signing happens after chmod
 echo "=== Test 8: Gatekeeper fix — ordering ==="
 assert_line_before "$INSTALL_SCRIPT" 'chmod 755' 'xattr -cr' "chmod before xattr"
 assert_line_before "$INSTALL_SCRIPT" 'chmod 755' 'codesign' "chmod before codesign"
 assert_line_before "$INSTALL_SCRIPT" 'xattr -cr' 'codesign' "xattr before codesign"
 
-# Test 3 (plan): xattr and codesign only on Darwin
+# xattr and codesign only on Darwin
 echo "=== Test 9: Gatekeeper fix — Darwin-only guard ==="
 
 # Verify xattr and codesign are between Darwin if and fi
 _darwin_line="$(grep -n 'uname -s.*Darwin' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)"
 _xattr_line="$(grep -n 'xattr -cr' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)"
 _codesign_line="$(grep -n 'codesign --force --sign -' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)"
-# Find the fi after the Darwin block (first fi after _darwin_line)
-_fi_line="$(awk -v start="$_darwin_line" 'NR > start && /^[[:space:]]*fi/ { print NR; exit }' "$INSTALL_SCRIPT")"
+# Find the closing fi of the Darwin block. The Darwin if is indented at
+# 4 spaces, so its fi is also at 4 spaces. Skip inner fi lines (8 spaces).
+_fi_line="$(awk -v start="$_darwin_line" 'NR > start && /^    fi$/ { print NR; exit }' "$INSTALL_SCRIPT")"
 
 if [ -n "$_darwin_line" ] && [ -n "$_xattr_line" ] && [ -n "$_codesign_line" ] && [ -n "$_fi_line" ]; then
     if [ "$_darwin_line" -lt "$_xattr_line" ] && \

@@ -12,23 +12,46 @@ fn strip_version_prefix(tag: &str) -> &str {
 }
 
 /// Determine the platform target triple at compile time.
-fn platform_target() -> String {
+/// Returns an error for unsupported architectures/OS combinations.
+fn platform_target() -> Result<String> {
     let arch = if cfg!(target_arch = "aarch64") {
         "aarch64"
-    } else {
+    } else if cfg!(target_arch = "x86_64") {
         "x86_64"
+    } else {
+        bail!("unsupported architecture: devproxy update only supports aarch64 and x86_64");
     };
     let os = if cfg!(target_os = "macos") {
         "apple-darwin"
-    } else {
+    } else if cfg!(target_os = "linux") {
         "unknown-linux-gnu"
+    } else {
+        bail!("unsupported OS: devproxy update only supports macOS and Linux");
     };
-    format!("{arch}-{os}")
+    Ok(format!("{arch}-{os}"))
+}
+
+/// Compare two version strings using semantic versioning.
+/// Returns true if `remote` is strictly newer than `current`.
+fn is_newer_version(current: &str, remote: &str) -> bool {
+    let current = semver::Version::parse(current);
+    let remote = semver::Version::parse(remote);
+    match (current, remote) {
+        (Ok(c), Ok(r)) => r > c,
+        // If either fails to parse, fall back to string inequality
+        _ => false,
+    }
 }
 
 pub async fn run() -> Result<()> {
+    tokio::task::spawn_blocking(run_blocking)
+        .await
+        .context("update task panicked")?
+}
+
+fn run_blocking() -> Result<()> {
     let current_version = env!("CARGO_PKG_VERSION");
-    let target = platform_target();
+    let target = platform_target()?;
 
     // Check latest version via GitHub API
     eprintln!("{} checking for updates...", "info:".cyan());
@@ -49,8 +72,8 @@ pub async fn run() -> Result<()> {
         .context("failed to parse GitHub release response")?;
     let remote_version = strip_version_prefix(&release.tag_name);
 
-    // Compare versions
-    if current_version == remote_version {
+    // Compare versions using semver
+    if !is_newer_version(current_version, remote_version) {
         eprintln!(
             "{} already up to date (v{current_version})",
             "ok:".green()
@@ -62,6 +85,17 @@ pub async fn run() -> Result<()> {
         "{} updating v{current_version} -> v{remote_version}",
         "info:".cyan()
     );
+
+    // Stop daemon before replacing binary, so there is a clean transition.
+    // Config::socket_path() is a static method that does not depend on
+    // loading a project config, so it works from any directory.
+    let socket_path = crate::config::Config::socket_path()?;
+    if socket_path.exists()
+        && crate::ipc::ping_sync(&socket_path, std::time::Duration::from_secs(2))
+    {
+        eprintln!("{} stopping daemon for update...", "info:".cyan());
+        super::init::kill_stale_daemon()?;
+    }
 
     // Download new binary
     let download_url = format!(
@@ -105,8 +139,20 @@ pub async fn run() -> Result<()> {
                 .output();
         }
 
-        // Atomic replace
-        std::fs::rename(&tmpfile, &exe_path).context("failed to replace binary")?;
+        // Replace binary. Try rename first (atomic, but only works on same
+        // filesystem). If rename fails with EXDEV (cross-device link), fall
+        // back to copy + remove.
+        match std::fs::rename(&tmpfile, &exe_path) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+                std::fs::copy(&tmpfile, &exe_path)
+                    .context("failed to copy new binary over existing one")?;
+                let _ = std::fs::remove_file(&tmpfile);
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context("failed to replace binary"));
+            }
+        }
 
         Ok(())
     })();
@@ -117,26 +163,14 @@ pub async fn run() -> Result<()> {
         return download_result;
     }
 
-    // Stop daemon if running
-    let config = crate::config::Config::load();
-    if let Ok(_config) = config {
-        let socket_path = crate::config::Config::socket_path()?;
-        if socket_path.exists()
-            && crate::ipc::ping_sync(&socket_path, std::time::Duration::from_secs(2))
-        {
-            eprintln!("{} stopping daemon for update...", "info:".cyan());
-            super::init::kill_stale_daemon()?;
-            eprintln!(
-                "{} run {} to restart the daemon",
-                "info:".cyan(),
-                "devproxy init".bold()
-            );
-        }
-    }
-
     eprintln!(
         "{} updated to v{remote_version}",
         "ok:".green()
+    );
+    eprintln!(
+        "{} run {} to restart the daemon",
+        "info:".cyan(),
+        "devproxy init".bold()
     );
 
     Ok(())
@@ -148,9 +182,34 @@ mod tests {
 
     #[test]
     fn test_version_comparison_up_to_date() {
-        let current = "0.1.0";
-        let remote = "0.1.0";
-        assert_eq!(current, strip_version_prefix(remote));
+        assert!(!is_newer_version("0.1.0", "0.1.0"));
+    }
+
+    #[test]
+    fn test_version_comparison_newer() {
+        assert!(is_newer_version("0.1.0", "0.2.0"));
+        assert!(is_newer_version("0.1.0", "1.0.0"));
+        assert!(is_newer_version("1.0.0", "1.0.1"));
+    }
+
+    #[test]
+    fn test_version_comparison_older_no_downgrade() {
+        assert!(!is_newer_version("0.2.0", "0.1.0"));
+        assert!(!is_newer_version("1.0.0", "0.9.0"));
+    }
+
+    #[test]
+    fn test_version_comparison_prerelease() {
+        // Pre-release is considered older than the release
+        assert!(is_newer_version("0.1.0-rc1", "0.1.0"));
+        assert!(!is_newer_version("0.1.0", "0.1.0-rc1"));
+    }
+
+    #[test]
+    fn test_version_comparison_unparseable() {
+        // Unparseable versions should not trigger an update
+        assert!(!is_newer_version("0.1.0", "not-a-version"));
+        assert!(!is_newer_version("not-a-version", "0.1.0"));
     }
 
     #[test]
@@ -163,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_platform_target() {
-        let target = platform_target();
+        let target = platform_target().expect("platform_target should succeed on test host");
         assert!(
             target.contains("apple-darwin") || target.contains("unknown-linux-gnu"),
             "target should contain a known OS: {target}"
