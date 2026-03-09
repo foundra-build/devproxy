@@ -18,10 +18,7 @@ fn validate_domain(domain: &str) -> Result<()> {
         if label.is_empty() || label.len() > 63 {
             bail!("domain label '{label}' must be 1-63 characters");
         }
-        if !label
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
-        {
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             bail!("domain label '{label}' contains invalid characters (only a-z, 0-9, - allowed)");
         }
         if label.starts_with('-') || label.ends_with('-') {
@@ -59,10 +56,7 @@ fn is_devproxy_process(pid: i32) -> bool {
         // On Linux, read /proc/<pid>/exe symlink.
         let exe = std::fs::read_link(format!("/proc/{pid}/exe"));
         match exe {
-            Ok(path) => path
-                .file_name()
-                .map(|n| n == "devproxy")
-                .unwrap_or(false),
+            Ok(path) => path.file_name().map(|n| n == "devproxy").unwrap_or(false),
             Err(_) => false,
         }
     }
@@ -129,17 +123,11 @@ fn kill_stale_daemon() -> Result<()> {
                     );
                     // Fall through to file cleanup
                 } else {
-                    eprintln!(
-                        "{} killing stale daemon (pid: {pid})...",
-                        "info:".cyan()
-                    );
+                    eprintln!("{} killing stale daemon (pid: {pid})...", "info:".cyan());
                     let mut killed = false;
                     if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
                         let err = std::io::Error::last_os_error();
-                        eprintln!(
-                            "{} SIGTERM failed for pid {pid}: {err}",
-                            "warn:".yellow()
-                        );
+                        eprintln!("{} SIGTERM failed for pid {pid}: {err}", "warn:".yellow());
                         // EPERM means we can't signal it -- bail with guidance
                         if err.raw_os_error() == Some(libc::EPERM) {
                             bail!(
@@ -159,10 +147,7 @@ fn kill_stale_daemon() -> Result<()> {
                             killed = true;
                         } else {
                             let err = std::io::Error::last_os_error();
-                            eprintln!(
-                                "{} SIGKILL failed for pid {pid}: {err}",
-                                "warn:".yellow()
-                            );
+                            eprintln!("{} SIGKILL failed for pid {pid}: {err}", "warn:".yellow());
                         }
                     }
                     if killed {
@@ -212,9 +197,7 @@ fn wait_for_daemon(timeout: Duration) -> Result<()> {
     let poll_interval = Duration::from_millis(100);
 
     while start.elapsed() < timeout {
-        if socket_path.exists()
-            && crate::ipc::ping_sync(&socket_path, Duration::from_secs(1))
-        {
+        if socket_path.exists() && crate::ipc::ping_sync(&socket_path, Duration::from_secs(1)) {
             return Ok(());
         }
         std::thread::sleep(poll_interval);
@@ -228,7 +211,9 @@ fn wait_for_daemon(timeout: Duration) -> Result<()> {
 
 pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     validate_domain(domain)?;
-    let config = Config { domain: domain.to_string() };
+    let config = Config {
+        domain: domain.to_string(),
+    };
 
     // Create config directory
     let config_dir = Config::config_dir()?;
@@ -257,13 +242,8 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
             Ok(()) => eprintln!("{} CA trusted in system keychain", "ok:".green()),
             Err(e) => {
                 ca_trust_needed = true;
-                eprintln!(
-                    "{} could not trust CA automatically: {e}",
-                    "warn:".yellow()
-                );
-                eprintln!(
-                    "  run manually with sudo:"
-                );
+                eprintln!("{} could not trust CA automatically: {e}", "warn:".yellow());
+                eprintln!("  run manually with sudo:");
                 #[cfg(target_os = "macos")]
                 eprintln!(
                     "    sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
@@ -303,7 +283,8 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         let ca_key_pem = std::fs::read_to_string(&ca_key_path)?;
 
         eprintln!("generating wildcard TLS certificate for *.{domain}...");
-        let (tls_cert_pem, tls_key_pem) = cert::generate_wildcard_cert(domain, &ca_cert_pem, &ca_key_pem)?;
+        let (tls_cert_pem, tls_key_pem) =
+            cert::generate_wildcard_cert(domain, &ca_cert_pem, &ca_key_pem)?;
         cert::write_pem(&tls_cert_path, &tls_cert_pem)?;
         cert::write_key_pem(&tls_key_path, &tls_key_pem)?;
         eprintln!("{} TLS certificate generated", "ok:".green());
@@ -357,7 +338,9 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
             .create(true)
             .append(true)
             .open(&daemon_log_path)
-            .with_context(|| format!("could not open daemon log at {}", daemon_log_path.display()))?;
+            .with_context(|| {
+                format!("could not open daemon log at {}", daemon_log_path.display())
+            })?;
 
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -367,7 +350,9 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         let pid = child.id();
         // Spawn a thread to reap the child so it does not become a zombie.
         // After setsid(), the child won't receive signals when the parent exits.
-        std::thread::spawn(move || { let _ = child.wait(); });
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
 
         // Wait for daemon to become responsive (or fail fast)
         match wait_for_daemon(Duration::from_secs(5)) {
@@ -375,15 +360,16 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
                 eprintln!("{} daemon started (pid: {pid})", "ok:".green());
             }
             Err(e) => {
-                eprintln!(
-                    "{} daemon failed to start: {e}",
-                    "error:".red()
-                );
+                eprintln!("{} daemon failed to start: {e}", "error:".red());
                 // Show last few lines of daemon log to help diagnose startup failures
                 if let Ok(log_contents) = std::fs::read_to_string(&daemon_log_path) {
                     let last_lines: Vec<&str> = log_contents.lines().rev().take(10).collect();
                     if !last_lines.is_empty() {
-                        eprintln!("  {} daemon log ({}):", "log:".cyan(), daemon_log_path.display());
+                        eprintln!(
+                            "  {} daemon log ({}):",
+                            "log:".cyan(),
+                            daemon_log_path.display()
+                        );
                         for line in last_lines.into_iter().rev() {
                             eprintln!("    {line}");
                         }
@@ -407,7 +393,10 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     eprintln!();
 
     // DNS setup instructions
-    eprintln!("  {} Set up wildcard DNS for *.{domain} -> 127.0.0.1", "1.".bold());
+    eprintln!(
+        "  {} Set up wildcard DNS for *.{domain} -> 127.0.0.1",
+        "1.".bold()
+    );
     #[cfg(target_os = "macos")]
     {
         eprintln!();
@@ -416,13 +405,18 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         eprintln!("       sudo brew services start dnsmasq");
         eprintln!();
         eprintln!("     Add wildcard DNS rule:");
-        eprintln!("       echo 'address=/.{domain}/127.0.0.1' >> $(brew --prefix)/etc/dnsmasq.conf");
+        eprintln!(
+            "       echo 'address=/.{domain}/127.0.0.1' >> $(brew --prefix)/etc/dnsmasq.conf"
+        );
         eprintln!("       sudo brew services restart dnsmasq");
         eprintln!();
         // Extract the TLD for the resolver. rsplit('.').next() always
         // returns Some (the last segment, or the whole string if no dot),
         // but we already validated the domain has at least two labels above.
-        let tld = domain.rsplit('.').next().expect("validated domain has a dot");
+        let tld = domain
+            .rsplit('.')
+            .next()
+            .expect("validated domain has a dot");
         eprintln!("     Create resolver for .{tld} domains:");
         eprintln!("       sudo mkdir -p /etc/resolver");
         eprintln!("       echo 'nameserver 127.0.0.1' | sudo tee /etc/resolver/{tld}");
@@ -437,7 +431,10 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     let mut step = 2;
     if ca_trust_needed {
         eprintln!("  {} Trust the CA certificate", format!("{step}.").bold());
-        eprintln!("     CA cert: {}", ca_cert_path.display().to_string().cyan());
+        eprintln!(
+            "     CA cert: {}",
+            ca_cert_path.display().to_string().cyan()
+        );
         #[cfg(target_os = "macos")]
         eprintln!(
             "     sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
@@ -453,7 +450,10 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     }
 
     // Project setup
-    eprintln!("  {} Add a devproxy.port label to your docker-compose.yml", format!("{step}.").bold());
+    eprintln!(
+        "  {} Add a devproxy.port label to your docker-compose.yml",
+        format!("{step}.").bold()
+    );
     eprintln!();
     eprintln!("  {} Run: devproxy up", format!("{}.", step + 1).bold());
 

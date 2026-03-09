@@ -126,9 +126,9 @@ pub fn find_devproxy_service(compose: &ComposeFile) -> Result<(String, u16)> {
 
     for (name, svc) in &compose.services {
         if let Some(port_str) = svc.labels.get("devproxy.port") {
-            let port: u16 = port_str
-                .parse()
-                .with_context(|| format!("invalid devproxy.port value '{port_str}' on service '{name}'"))?;
+            let port: u16 = port_str.parse().with_context(|| {
+                format!("invalid devproxy.port value '{port_str}' on service '{name}'")
+            })?;
             found.push((name.clone(), port));
         }
     }
@@ -138,7 +138,11 @@ pub fn find_devproxy_service(compose: &ComposeFile) -> Result<(String, u16)> {
         1 => Ok(found.into_iter().next().expect("checked len")),
         _ => bail!(
             "multiple services have devproxy.port labels: {}. Only one is supported.",
-            found.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+            found
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     }
 }
@@ -156,7 +160,12 @@ pub fn parse_compose_file(path: &Path) -> Result<ComposeFile> {
 /// Searches for docker-compose.yml, docker-compose.yaml, compose.yml, compose.yaml.
 /// Returns the full path.
 pub fn find_compose_file(dir: &Path) -> Result<PathBuf> {
-    for name in &["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"] {
+    for name in &[
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+    ] {
         let path = dir.join(name);
         if path.exists() {
             return Ok(path);
@@ -170,7 +179,12 @@ pub fn find_compose_file(dir: &Path) -> Result<PathBuf> {
 /// The service name is validated to contain only alphanumeric, hyphen, and
 /// underscore characters before being interpolated into YAML, preventing
 /// injection of arbitrary YAML content.
-pub fn write_override_file(dir: &Path, service_name: &str, host_port: u16, container_port: u16) -> Result<PathBuf> {
+pub fn write_override_file(
+    dir: &Path,
+    service_name: &str,
+    host_port: u16,
+    container_port: u16,
+) -> Result<PathBuf> {
     // Validate service name to prevent YAML injection
     if service_name.is_empty()
         || !service_name
@@ -202,11 +216,12 @@ pub fn write_project_file(dir: &Path, slug: &str) -> Result<PathBuf> {
 /// Returns an error if the file doesn't exist (project not running via devproxy).
 pub fn read_project_file(dir: &Path) -> Result<String> {
     let path = dir.join(".devproxy-project");
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!(
+    let content = std::fs::read_to_string(&path).with_context(|| {
+        format!(
             "no .devproxy-project file found in {}. Is this project running via `devproxy up`?",
             dir.display()
-        ))?;
+        )
+    })?;
     Ok(content.trim().to_string())
 }
 
@@ -236,10 +251,7 @@ mod tests {
         let config_dir = dir.path().to_path_buf();
 
         // Write a minimal config so `status` tries to connect to the socket
-        std::fs::write(
-            config_dir.join("config.json"),
-            r#"{"domain":"test.dev"}"#,
-        ).unwrap();
+        std::fs::write(config_dir.join("config.json"), r#"{"domain":"test.dev"}"#).unwrap();
 
         // Find the binary
         let mut bin = std::env::current_exe().unwrap();
@@ -340,7 +352,12 @@ services:
         let dir = tempfile::tempdir().unwrap();
         let result = read_project_file(dir.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains(".devproxy-project"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains(".devproxy-project")
+        );
     }
 
     #[test]
@@ -356,6 +373,11 @@ services:
         let dir = tempfile::tempdir().unwrap();
         let result = find_compose_file(dir.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no docker-compose.yml"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no docker-compose.yml")
+        );
     }
 }

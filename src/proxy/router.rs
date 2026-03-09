@@ -31,16 +31,20 @@ impl Router {
     /// Insert a route: slug -> host_port. The full hostname is slug.domain.
     pub fn insert(&self, slug: &str, host_port: u16) {
         let hostname = format!("{slug}.{}", self.domain);
-        let route = Route {
-            host_port,
-        };
-        self.routes.write().expect("lock poisoned").insert(hostname, route);
+        let route = Route { host_port };
+        self.routes
+            .write()
+            .expect("lock poisoned")
+            .insert(hostname, route);
     }
 
     /// Remove a route by slug
     pub fn remove(&self, slug: &str) {
         let hostname = format!("{slug}.{}", self.domain);
-        self.routes.write().expect("lock poisoned").remove(&hostname);
+        self.routes
+            .write()
+            .expect("lock poisoned")
+            .remove(&hostname);
     }
 
     /// Look up a host_port by full hostname (e.g., "swift-penguin.mysite.dev")

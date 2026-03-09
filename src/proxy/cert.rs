@@ -16,10 +16,7 @@ pub fn generate_ca() -> Result<(String, String)> {
     params
         .distinguished_name
         .push(DnType::OrganizationName, "devproxy");
-    params.key_usages = vec![
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::CrlSign,
-    ];
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params.not_before = time::OffsetDateTime::now_utc() - Duration::from_secs(3600);
     params.not_after = time::OffsetDateTime::now_utc() + Duration::from_secs(365 * 24 * 3600 * 10);
 
@@ -40,14 +37,20 @@ pub fn generate_wildcard_cert(
     let ca_key = KeyPair::from_pem(ca_key_pem).context("failed to parse CA key")?;
     let ca_params = CertificateParams::from_ca_cert_pem(ca_cert_pem)
         .context("failed to parse CA cert params")?;
-    let ca_cert = ca_params.self_signed(&ca_key).context("failed to reconstruct CA cert")?;
+    let ca_cert = ca_params
+        .self_signed(&ca_key)
+        .context("failed to reconstruct CA cert")?;
 
     let mut params = CertificateParams::default();
     params
         .distinguished_name
         .push(DnType::CommonName, format!("*.{domain}"));
     params.subject_alt_names = vec![
-        SanType::DnsName(format!("*.{domain}").try_into().context("invalid wildcard DNS name")?),
+        SanType::DnsName(
+            format!("*.{domain}")
+                .try_into()
+                .context("invalid wildcard DNS name")?,
+        ),
         SanType::DnsName(domain.to_string().try_into().context("invalid DNS name")?),
     ];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
@@ -140,8 +143,10 @@ pub fn trust_ca_in_system(ca_cert_path: &Path) -> Result<()> {
             .args([
                 "add-trusted-cert",
                 "-d",
-                "-r", "trustRoot",
-                "-k", "/Library/Keychains/System.keychain",
+                "-r",
+                "trustRoot",
+                "-k",
+                "/Library/Keychains/System.keychain",
             ])
             .arg(ca_cert_path)
             .status()

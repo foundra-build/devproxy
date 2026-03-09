@@ -1,14 +1,12 @@
 use rand::seq::IndexedRandom;
 
 const ADJECTIVES: &[&str] = &[
-    "swift", "bright", "calm", "bold", "keen",
-    "warm", "cool", "wild", "fair", "glad",
-    "quick", "brave", "proud", "true", "wise",
+    "swift", "bright", "calm", "bold", "keen", "warm", "cool", "wild", "fair", "glad", "quick",
+    "brave", "proud", "true", "wise",
 ];
 
 const ANIMALS: &[&str] = &[
-    "penguin", "falcon", "otter", "fox", "heron",
-    "whale", "eagle", "tiger", "panda", "koala",
+    "penguin", "falcon", "otter", "fox", "heron", "whale", "eagle", "tiger", "panda", "koala",
     "raven", "wolf", "lynx", "hawk", "crane",
 ];
 
@@ -28,8 +26,14 @@ mod tests {
         let slug = generate_slug();
         let parts: Vec<&str> = slug.split('-').collect();
         assert_eq!(parts.len(), 2, "slug should be adjective-animal: {slug}");
-        assert!(ADJECTIVES.contains(&parts[0]), "first word should be an adjective: {slug}");
-        assert!(ANIMALS.contains(&parts[1]), "second word should be an animal: {slug}");
+        assert!(
+            ADJECTIVES.contains(&parts[0]),
+            "first word should be an adjective: {slug}"
+        );
+        assert!(
+            ANIMALS.contains(&parts[1]),
+            "second word should be an animal: {slug}"
+        );
     }
 
     #[test]

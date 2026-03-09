@@ -51,14 +51,12 @@ pub async fn send_request_with_timeout(
 }
 
 async fn send_request_inner(socket_path: &Path, request: &Request) -> Result<Response> {
-    let stream = UnixStream::connect(socket_path)
-        .await
-        .with_context(|| {
-            format!(
-                "could not connect to daemon at {}. Is the daemon running? Try `devproxy init`.",
-                socket_path.display()
-            )
-        })?;
+    let stream = UnixStream::connect(socket_path).await.with_context(|| {
+        format!(
+            "could not connect to daemon at {}. Is the daemon running? Try `devproxy init`.",
+            socket_path.display()
+        )
+    })?;
 
     let (reader, mut writer) = stream.into_split();
 
@@ -73,8 +71,8 @@ async fn send_request_inner(socket_path: &Path, request: &Request) -> Result<Res
     let mut response_line = String::new();
     buf_reader.read_line(&mut response_line).await?;
 
-    let response: Response = serde_json::from_str(response_line.trim())
-        .context("could not parse daemon response")?;
+    let response: Response =
+        serde_json::from_str(response_line.trim()).context("could not parse daemon response")?;
     Ok(response)
 }
 
@@ -136,7 +134,8 @@ mod tests {
 
     #[test]
     fn deserialize_routes_response() {
-        let json = r#"{"status":"routes","routes":[{"slug":"swift-penguin.mysite.dev","port":51234}]}"#;
+        let json =
+            r#"{"status":"routes","routes":[{"slug":"swift-penguin.mysite.dev","port":51234}]}"#;
         let resp: Response = serde_json::from_str(json).unwrap();
         match resp {
             Response::Routes { routes } => {
@@ -152,7 +151,10 @@ mod tests {
     fn ping_sync_returns_false_on_nonexistent_socket() {
         let dir = tempfile::tempdir().unwrap();
         let sock_path = dir.path().join("nonexistent.sock");
-        assert!(!ping_sync(&sock_path, std::time::Duration::from_millis(100)));
+        assert!(!ping_sync(
+            &sock_path,
+            std::time::Duration::from_millis(100)
+        ));
     }
 
     /// Verify that send_request_with_timeout returns an error when the

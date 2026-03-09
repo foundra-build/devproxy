@@ -13,7 +13,11 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { domain, port, no_daemon } => commands::init::run(&domain, port, no_daemon),
+        Commands::Init {
+            domain,
+            port,
+            no_daemon,
+        } => commands::init::run(&domain, port, no_daemon),
         Commands::Up => commands::up::run(),
         Commands::Down => commands::down::run(),
         Commands::Ls => commands::ls::run().await,

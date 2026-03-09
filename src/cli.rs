@@ -1,7 +1,10 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "devproxy", about = "Local HTTPS dev subdomains for Docker Compose")]
+#[command(
+    name = "devproxy",
+    about = "Local HTTPS dev subdomains for Docker Compose"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

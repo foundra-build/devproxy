@@ -37,11 +37,9 @@ pub fn run() -> Result<()> {
     eprintln!("host port: {}", host_port.to_string().cyan());
 
     // Write override file (port binding)
-    let override_path = config::write_override_file(compose_dir, &service_name, host_port, container_port)?;
-    eprintln!(
-        "override: {}",
-        override_path.display().to_string().cyan()
-    );
+    let override_path =
+        config::write_override_file(compose_dir, &service_name, host_port, container_port)?;
+    eprintln!("override: {}", override_path.display().to_string().cyan());
 
     // Write project file (slug tracking -- used by `down` and `open`)
     config::write_project_file(compose_dir, &slug)?;
@@ -53,7 +51,10 @@ pub fn run() -> Result<()> {
         // Clean up files we already wrote
         let _ = std::fs::remove_file(&override_path);
         let _ = std::fs::remove_file(compose_dir.join(".devproxy-project"));
-        bail!("daemon is not running (no socket at {}). Run `devproxy init` first.", socket_path.display());
+        bail!(
+            "daemon is not running (no socket at {}). Run `devproxy init` first.",
+            socket_path.display()
+        );
     }
 
     // Send an actual IPC ping with a 2s timeout to verify the daemon is

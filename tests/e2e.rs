@@ -46,7 +46,10 @@ fn find_free_port() -> u16 {
 /// Copy the fixtures directory into an isolated temp dir for one test.
 /// Returns the path to the copy (which contains docker-compose.yml, Dockerfile, etc).
 fn copy_fixtures(test_name: &str) -> PathBuf {
-    let dest = std::env::temp_dir().join(format!("devproxy-fixtures-{test_name}-{}", std::process::id()));
+    let dest = std::env::temp_dir().join(format!(
+        "devproxy-fixtures-{test_name}-{}",
+        std::process::id()
+    ));
     if dest.exists() {
         std::fs::remove_dir_all(&dest).unwrap();
     }
@@ -64,7 +67,10 @@ fn copy_fixtures(test_name: &str) -> PathBuf {
 /// Create an isolated test config directory and generate certs using `init --no-daemon`.
 /// Returns the path to the config directory (to be set as DEVPROXY_CONFIG_DIR).
 fn create_test_config_dir(test_name: &str) -> PathBuf {
-    let config_dir = std::env::temp_dir().join(format!("devproxy-config-{test_name}-{}", std::process::id()));
+    let config_dir = std::env::temp_dir().join(format!(
+        "devproxy-config-{test_name}-{}",
+        std::process::id()
+    ));
     if config_dir.exists() {
         std::fs::remove_dir_all(&config_dir).unwrap();
     }
@@ -86,9 +92,18 @@ fn create_test_config_dir(test_name: &str) -> PathBuf {
     );
 
     // Verify certs were created
-    assert!(config_dir.join("ca-cert.pem").exists(), "CA cert should exist after init");
-    assert!(config_dir.join("tls-cert.pem").exists(), "TLS cert should exist after init");
-    assert!(config_dir.join("config.json").exists(), "config should exist after init");
+    assert!(
+        config_dir.join("ca-cert.pem").exists(),
+        "CA cert should exist after init"
+    );
+    assert!(
+        config_dir.join("tls-cert.pem").exists(),
+        "TLS cert should exist after init"
+    );
+    assert!(
+        config_dir.join("config.json").exists(),
+        "config should exist after init"
+    );
 
     config_dir
 }
@@ -126,15 +141,16 @@ fn start_test_daemon(config_dir: &Path, port: u16) -> DaemonGuard {
     // Wait for IPC socket to become connectable
     let socket_path = config_dir.join("devproxy.sock");
     for _ in 0..50 {
-        if socket_path.exists()
-            && std::os::unix::net::UnixStream::connect(&socket_path).is_ok()
-        {
+        if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
             return guard;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    panic!("daemon did not start within 5 seconds (socket: {})", socket_path.display());
+    panic!(
+        "daemon did not start within 5 seconds (socket: {})",
+        socket_path.display()
+    );
 }
 
 /// Guard that runs docker compose down on drop and cleans up the fixtures copy
@@ -185,14 +201,17 @@ fn test_cli_help() {
     // Daemon should be hidden as a top-level command (it may appear in descriptions)
     // Check that "daemon" does not appear as a command entry (lines starting with "  daemon")
     assert!(
-        !stdout.lines().any(|l| l.trim_start().starts_with("daemon ")),
+        !stdout
+            .lines()
+            .any(|l| l.trim_start().starts_with("daemon ")),
         "daemon command should be hidden from help"
     );
 }
 
 #[test]
 fn test_init_generates_certs() {
-    let config_dir = std::env::temp_dir().join(format!("devproxy-init-test-{}", std::process::id()));
+    let config_dir =
+        std::env::temp_dir().join(format!("devproxy-init-test-{}", std::process::id()));
     std::fs::create_dir_all(&config_dir).unwrap();
 
     let output = Command::new(devproxy_bin())
@@ -202,11 +221,26 @@ fn test_init_generates_certs() {
         .expect("failed to run devproxy init");
 
     assert!(output.status.success(), "init should succeed");
-    assert!(config_dir.join("ca-cert.pem").exists(), "CA cert should exist");
-    assert!(config_dir.join("ca-key.pem").exists(), "CA key should exist");
-    assert!(config_dir.join("tls-cert.pem").exists(), "TLS cert should exist");
-    assert!(config_dir.join("tls-key.pem").exists(), "TLS key should exist");
-    assert!(config_dir.join("config.json").exists(), "config should exist");
+    assert!(
+        config_dir.join("ca-cert.pem").exists(),
+        "CA cert should exist"
+    );
+    assert!(
+        config_dir.join("ca-key.pem").exists(),
+        "CA key should exist"
+    );
+    assert!(
+        config_dir.join("tls-cert.pem").exists(),
+        "TLS cert should exist"
+    );
+    assert!(
+        config_dir.join("tls-key.pem").exists(),
+        "TLS key should exist"
+    );
+    assert!(
+        config_dir.join("config.json").exists(),
+        "config should exist"
+    );
 
     // Verify idempotency: running init again should succeed and not error
     let output2 = Command::new(devproxy_bin())
@@ -217,7 +251,10 @@ fn test_init_generates_certs() {
 
     assert!(output2.status.success(), "init should be idempotent");
     let stderr2 = String::from_utf8_lossy(&output2.stderr);
-    assert!(stderr2.contains("already exists"), "should report certs already exist");
+    assert!(
+        stderr2.contains("already exists"),
+        "should report certs already exist"
+    );
 
     let _ = std::fs::remove_dir_all(&config_dir);
 }
@@ -258,7 +295,8 @@ fn test_up_without_label() {
     .unwrap();
 
     // Create a compose file without devproxy.port
-    let test_dir = std::env::temp_dir().join(format!("devproxy-nolabel-project-{}", std::process::id()));
+    let test_dir =
+        std::env::temp_dir().join(format!("devproxy-nolabel-project-{}", std::process::id()));
     std::fs::create_dir_all(&test_dir).unwrap();
     std::fs::write(
         test_dir.join("docker-compose.yml"),
@@ -289,7 +327,8 @@ fn test_up_without_label() {
 
 #[test]
 fn test_up_without_compose_file() {
-    let config_dir = std::env::temp_dir().join(format!("devproxy-nocompose-{}", std::process::id()));
+    let config_dir =
+        std::env::temp_dir().join(format!("devproxy-nocompose-{}", std::process::id()));
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(
         config_dir.join("config.json"),
@@ -297,7 +336,8 @@ fn test_up_without_compose_file() {
     )
     .unwrap();
 
-    let test_dir = std::env::temp_dir().join(format!("devproxy-nocompose-project-{}", std::process::id()));
+    let test_dir =
+        std::env::temp_dir().join(format!("devproxy-nocompose-project-{}", std::process::id()));
     std::fs::create_dir_all(&test_dir).unwrap();
 
     let output = Command::new(devproxy_bin())
@@ -307,7 +347,10 @@ fn test_up_without_compose_file() {
         .output()
         .expect("failed to run up");
 
-    assert!(!output.status.success(), "up should fail without compose file");
+    assert!(
+        !output.status.success(),
+        "up should fail without compose file"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("no docker-compose.yml"),
@@ -328,7 +371,8 @@ fn test_down_without_project_file() {
     )
     .unwrap();
 
-    let config_dir = std::env::temp_dir().join(format!("devproxy-noproject-cfg-{}", std::process::id()));
+    let config_dir =
+        std::env::temp_dir().join(format!("devproxy-noproject-cfg-{}", std::process::id()));
     std::fs::create_dir_all(&config_dir).unwrap();
 
     let output = Command::new(devproxy_bin())
@@ -338,7 +382,10 @@ fn test_down_without_project_file() {
         .output()
         .expect("failed to run down");
 
-    assert!(!output.status.success(), "down should fail without .devproxy-project");
+    assert!(
+        !output.status.success(),
+        "down should fail without .devproxy-project"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains(".devproxy-project") || stderr.contains("Is this project running"),
@@ -381,24 +428,30 @@ fn test_full_e2e_workflow() {
 
     let up_stderr = String::from_utf8_lossy(&up_output.stderr);
     eprintln!("up output: {up_stderr}");
-    assert!(up_output.status.success(), "devproxy up should succeed: {up_stderr}");
+    assert!(
+        up_output.status.success(),
+        "devproxy up should succeed: {up_stderr}"
+    );
 
     // Extract slug from output (look for "-> https://<slug>.test.devproxy.dev")
     let slug = up_stderr
         .lines()
         .find(|l| l.contains(&format!(".{TEST_DOMAIN}")))
-        .and_then(|l| {
-            l.split("https://")
-                .nth(1)
-                .and_then(|s| s.split('.').next())
-        })
+        .and_then(|l| l.split("https://").nth(1).and_then(|s| s.split('.').next()))
         .expect("should find slug in up output");
 
     // Verify .devproxy-project was written with the correct slug
     let project_file = fixtures.join(".devproxy-project");
-    assert!(project_file.exists(), ".devproxy-project should exist after up");
+    assert!(
+        project_file.exists(),
+        ".devproxy-project should exist after up"
+    );
     let saved_slug = std::fs::read_to_string(&project_file).unwrap();
-    assert_eq!(saved_slug.trim(), slug, ".devproxy-project should contain the slug");
+    assert_eq!(
+        saved_slug.trim(),
+        slug,
+        ".devproxy-project should contain the slug"
+    );
 
     let _compose_guard = ComposeGuard {
         project_name: slug.to_string(),
@@ -483,11 +536,20 @@ fn test_full_e2e_workflow() {
         .output()
         .expect("failed to run devproxy down");
     let down_stderr = String::from_utf8_lossy(&down_output.stderr);
-    assert!(down_output.status.success(), "devproxy down should succeed: {down_stderr}");
+    assert!(
+        down_output.status.success(),
+        "devproxy down should succeed: {down_stderr}"
+    );
 
     // Verify cleanup files are gone
-    assert!(!fixtures.join(".devproxy-project").exists(), ".devproxy-project should be removed after down");
-    assert!(!fixtures.join(".devproxy-override.yml").exists(), ".devproxy-override.yml should be removed after down");
+    assert!(
+        !fixtures.join(".devproxy-project").exists(),
+        ".devproxy-project should be removed after down"
+    );
+    assert!(
+        !fixtures.join(".devproxy-override.yml").exists(),
+        ".devproxy-override.yml should be removed after down"
+    );
 }
 
 /// Test self-healing: kill container externally -> route removed from daemon
@@ -536,7 +598,10 @@ fn test_self_healing_route_removed_on_container_die() {
         .output()
         .expect("failed to ls");
     let ls_before_stdout = String::from_utf8_lossy(&ls_before.stdout);
-    assert!(ls_before_stdout.contains(slug), "route should exist before kill: {ls_before_stdout}");
+    assert!(
+        ls_before_stdout.contains(slug),
+        "route should exist before kill: {ls_before_stdout}"
+    );
 
     // Kill container externally (not via devproxy)
     let kill_status = Command::new("docker")
@@ -648,18 +713,27 @@ fn test_proxy_502_for_unknown_host() {
     let curl_output = Command::new("curl")
         .args([
             "-s",
-            "-o", "/dev/null",
-            "-w", "%{http_code}",
-            "--max-time", "5",
-            "--resolve", &format!("{host}:{daemon_port}:127.0.0.1"),
-            "--cacert", &ca_cert_path.to_string_lossy(),
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "5",
+            "--resolve",
+            &format!("{host}:{daemon_port}:127.0.0.1"),
+            "--cacert",
+            &ca_cert_path.to_string_lossy(),
             &url,
         ])
         .output()
         .expect("failed to run curl");
 
     let status_code = String::from_utf8_lossy(&curl_output.stdout);
-    assert_eq!(status_code.trim(), "502", "should get 502 for unknown host, got: {status_code}");
+    assert_eq!(
+        status_code.trim(),
+        "502",
+        "should get 502 for unknown host, got: {status_code}"
+    );
 }
 
 /// IPC ping/pong test
@@ -678,8 +752,14 @@ fn test_ipc_ping_pong() {
 
     assert!(output.status.success(), "status should succeed");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("running"), "should report daemon running: {stderr}");
-    assert!(stderr.contains("active routes: 0"), "should report 0 routes: {stderr}");
+    assert!(
+        stderr.contains("running"),
+        "should report daemon running: {stderr}"
+    );
+    assert!(
+        stderr.contains("active routes: 0"),
+        "should report 0 routes: {stderr}"
+    );
 }
 
 // ---- New daemon setup flow tests -------------------------------------------
@@ -724,7 +804,8 @@ fn test_init_output_includes_dns_instructions() {
 /// Verify init output includes sudo note for port 443
 #[test]
 fn test_init_output_includes_sudo_note() {
-    let config_dir = std::env::temp_dir().join(format!("devproxy-sudo-test-{}", std::process::id()));
+    let config_dir =
+        std::env::temp_dir().join(format!("devproxy-sudo-test-{}", std::process::id()));
     std::fs::create_dir_all(&config_dir).unwrap();
 
     // Use --no-daemon so we don't need root, but still verify the output mentions sudo
@@ -751,7 +832,8 @@ fn test_init_output_includes_sudo_note() {
 /// of whether automatic trust succeeds or fails.
 #[test]
 fn test_init_output_includes_ca_trust_path() {
-    let config_dir = std::env::temp_dir().join(format!("devproxy-capath-test-{}", std::process::id()));
+    let config_dir =
+        std::env::temp_dir().join(format!("devproxy-capath-test-{}", std::process::id()));
     std::fs::create_dir_all(&config_dir).unwrap();
 
     let output = Command::new(devproxy_bin())
@@ -791,7 +873,8 @@ fn test_up_fails_fast_with_dead_daemon() {
     .unwrap();
 
     // Create a compose file with devproxy.port
-    let test_dir = std::env::temp_dir().join(format!("devproxy-deadup-project-{}", std::process::id()));
+    let test_dir =
+        std::env::temp_dir().join(format!("devproxy-deadup-project-{}", std::process::id()));
     std::fs::create_dir_all(&test_dir).unwrap();
     std::fs::write(
         test_dir.join("docker-compose.yml"),
@@ -860,12 +943,16 @@ fn test_daemon_writes_pid_file() {
     );
 
     let pid_str = std::fs::read_to_string(&pid_path).unwrap();
-    let pid: u32 = pid_str.trim().parse().expect("PID file should contain a valid number");
+    let pid: u32 = pid_str
+        .trim()
+        .parse()
+        .expect("PID file should contain a valid number");
     assert!(pid > 0, "PID should be positive");
 
     // Verify the PID matches the actual daemon process
     assert_eq!(
-        pid, daemon.child.id(),
+        pid,
+        daemon.child.id(),
         "PID file should match the daemon's actual PID"
     );
 }
@@ -884,7 +971,10 @@ fn test_reinit_kills_stale_daemon() {
 
     // Verify first daemon is alive and has a PID file
     let pid_path = config_dir.join("daemon.pid");
-    assert!(pid_path.exists(), "PID file should exist after first daemon start");
+    assert!(
+        pid_path.exists(),
+        "PID file should exist after first daemon start"
+    );
     let saved_pid: u32 = std::fs::read_to_string(&pid_path)
         .unwrap()
         .trim()
@@ -897,10 +987,8 @@ fn test_reinit_kills_stale_daemon() {
     // with a dummy so the guard's Drop is harmless, and keep the real
     // child handle for cleanup at end of test.
     daemon1.config_dir = PathBuf::new();
-    let mut original_child = std::mem::replace(
-        &mut daemon1.child,
-        Command::new("true").spawn().unwrap(),
-    );
+    let mut original_child =
+        std::mem::replace(&mut daemon1.child, Command::new("true").spawn().unwrap());
     // Drop the guard -- its Drop will kill+wait the "true" dummy (harmless).
     drop(daemon1);
 
@@ -916,8 +1004,10 @@ fn test_reinit_kills_stale_daemon() {
     let output = Command::new(devproxy_bin())
         .args([
             "init",
-            "--domain", TEST_DOMAIN,
-            "--port", &daemon_port2.to_string(),
+            "--domain",
+            TEST_DOMAIN,
+            "--port",
+            &daemon_port2.to_string(),
         ])
         .env("DEVPROXY_CONFIG_DIR", &config_dir)
         .output()
