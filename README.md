@@ -24,6 +24,12 @@ devproxy up
 - **No external proxy** — single Rust binary, no Caddy/Traefik/nginx
 - **Human-readable slugs** — random adjective-animal subdomains
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/foundra-build/devproxy/main/install.sh | sh
+```
+
 ## Quick Start
 
 ```bash
