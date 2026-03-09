@@ -15,6 +15,21 @@ use router::Router;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixListener};
 
+/// RAII guard that removes the IPC socket file on drop, ensuring cleanup
+/// on both normal shutdown and error paths.
+struct SocketCleanupGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for SocketCleanupGuard {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            let _ = std::fs::remove_file(&self.path);
+            eprintln!("cleaned up socket: {}", self.path.display());
+        }
+    }
+}
+
 /// Run the daemon: HTTPS proxy + Docker watcher + IPC server
 pub async fn run_daemon(port: u16) -> Result<()> {
     let config = Config::load().context("failed to load config. Run `devproxy init` first.")?;
@@ -45,20 +60,27 @@ pub async fn run_daemon(port: u16) -> Result<()> {
     }
 
     if socket_path.exists() {
-        // Try to connect asynchronously to see if another daemon is already listening
-        if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
+        // Send an actual IPC ping to verify the daemon is functional, not
+        // just accepting connections (which could happen during shutdown).
+        let is_alive = matches!(
+            crate::ipc::send_request(&socket_path, &Request::Ping).await,
+            Ok(Response::Pong)
+        );
+        if is_alive {
             bail!(
-                "another daemon appears to be running (socket {} is live). \
+                "another daemon appears to be running (socket {} responded to ping). \
                  Stop it first or remove the stale socket.",
                 socket_path.display()
             );
         }
-        // Stale socket from a previous crash -- safe to remove
+        // Stale socket from a previous crash or mid-shutdown -- safe to remove
         std::fs::remove_file(&socket_path)?;
     }
 
     let ipc_listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("could not bind IPC socket at {}", socket_path.display()))?;
+    // Ensure the socket file is removed when the daemon exits (normal or error).
+    let _socket_guard = SocketCleanupGuard { path: socket_path.clone() };
     eprintln!("IPC listening on {}", socket_path.display());
 
     // Set up HTTPS listener

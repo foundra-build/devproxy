@@ -178,46 +178,52 @@ async fn watch_events_inner(router: &Router) -> Result<()> {
     while let Some(line) = lines.next_line().await? {
         // Docker events JSON can use different field casing across versions.
         // Parse as generic Value to handle both.
-        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
-            let action = event
-                .get("Action")
-                .or_else(|| event.get("action"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            let container_id = event
-                .get("Actor")
-                .or_else(|| event.get("actor"))
-                .and_then(|a| a.get("ID").or_else(|| a.get("id")))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            match action {
-                "start" => {
-                    if let Ok(Some((slug, port))) = inspect_container(container_id).await {
-                        eprintln!("  route added: {slug} -> 127.0.0.1:{port}");
-                        router.insert(&slug, port);
-                    }
-                }
-                "die" | "stop" | "kill" => {
-                    // Get the project name from event attributes
-                    let slug = event
-                        .get("Actor")
-                        .or_else(|| event.get("actor"))
-                        .and_then(|a| a.get("Attributes").or_else(|| a.get("attributes")))
-                        .and_then(|attrs| {
-                            attrs
-                                .get("com.docker.compose.project")
-                                .and_then(|v| v.as_str())
-                        });
-
-                    if let Some(slug) = slug {
-                        eprintln!("  route removed: {slug}");
-                        router.remove(slug);
-                    }
-                }
-                _ => {}
+        let event = match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(event) => event,
+            Err(e) => {
+                eprintln!("  warning: failed to parse docker event JSON: {e} (line: {line})");
+                continue;
             }
+        };
+
+        let action = event
+            .get("Action")
+            .or_else(|| event.get("action"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let container_id = event
+            .get("Actor")
+            .or_else(|| event.get("actor"))
+            .and_then(|a| a.get("ID").or_else(|| a.get("id")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        match action {
+            "start" => {
+                if let Ok(Some((slug, port))) = inspect_container(container_id).await {
+                    eprintln!("  route added: {slug} -> 127.0.0.1:{port}");
+                    router.insert(&slug, port);
+                }
+            }
+            "die" | "stop" | "kill" => {
+                // Get the project name from event attributes
+                let slug = event
+                    .get("Actor")
+                    .or_else(|| event.get("actor"))
+                    .and_then(|a| a.get("Attributes").or_else(|| a.get("attributes")))
+                    .and_then(|attrs| {
+                        attrs
+                            .get("com.docker.compose.project")
+                            .and_then(|v| v.as_str())
+                    });
+
+                if let Some(slug) = slug {
+                    eprintln!("  route removed: {slug}");
+                    router.remove(slug);
+                }
+            }
+            _ => {}
         }
     }
 
