@@ -82,10 +82,8 @@ download_binary() {
     trap 'rm -f "$TMPFILE"' EXIT
 
     if command -v curl >/dev/null 2>&1; then
-        HTTP_CODE=$(curl -fsSL -w '%{http_code}' -o "$TMPFILE" "$DOWNLOAD_URL" 2>/dev/null) || true
-        if [ ! -s "$TMPFILE" ]; then
+        if ! curl -fsSL -o "$TMPFILE" "$DOWNLOAD_URL"; then
             echo "Error: failed to download devproxy from ${DOWNLOAD_URL}" >&2
-            echo "HTTP status: ${HTTP_CODE:-unknown}" >&2
             exit 1
         fi
     elif command -v wget >/dev/null 2>&1; then
@@ -359,7 +357,13 @@ MOCK_DIR="$TMPDIR_ROOT/mock-server"
 mkdir -p "$MOCK_DIR/latest/download"
 
 # Create a mock binary (shell script that echoes version)
-MOCK_BINARY="$MOCK_DIR/latest/download/devproxy-$(uname -m | sed 's/arm64/aarch64/')-$(case "$(uname -s)" in Darwin) echo apple-darwin;; Linux) echo unknown-linux-gnu;; esac)"
+# Determine the current platform's target triple for the mock binary filename
+_mock_arch="$(uname -m | sed 's/arm64/aarch64/')"
+case "$(uname -s)" in
+    Darwin) _mock_os="apple-darwin" ;;
+    Linux)  _mock_os="unknown-linux-gnu" ;;
+esac
+MOCK_BINARY="$MOCK_DIR/latest/download/devproxy-${_mock_arch}-${_mock_os}"
 cat > "$MOCK_BINARY" <<'MOCKBIN'
 #!/bin/sh
 echo "devproxy mock 0.0.1-test"
