@@ -214,30 +214,35 @@ async fn proxy_to_upstream(
         }
     });
 
-    // Build the upstream request preserving method, path, and headers
-    let upstream_uri: hyper::Uri = format!("http://{upstream_addr}{path_and_query}")
+    // Build the upstream request preserving method, path, and headers.
+    // Use path-only URI (not full http://host/path) since this is a
+    // reverse proxy sending to an origin server, not a forward proxy.
+    let upstream_uri: hyper::Uri = path_and_query
         .parse()
-        .context("invalid upstream URI")?;
+        .context("invalid upstream URI path")?;
     let method = incoming_req.method().clone();
     let headers = incoming_req.headers().clone();
 
-    let body = incoming_req
+    // Cap request body at 100MB to prevent memory exhaustion from
+    // oversized uploads.
+    const MAX_BODY_SIZE: usize = 100 * 1024 * 1024;
+    let limited = http_body_util::Limited::new(incoming_req, MAX_BODY_SIZE);
+    let body = limited
         .collect()
         .await
-        .map_err(|e| anyhow::anyhow!("failed to collect body: {e}"))?
+        .map_err(|e| anyhow::anyhow!("failed to collect body (max {MAX_BODY_SIZE} bytes): {e}"))?
         .to_bytes();
 
-    // Build headers on the builder before constructing the request.
-    // Set the upstream Host header to target the container's address.
+    // Preserve the original Host header so upstream frameworks see the
+    // correct domain for URL generation, CSRF checks, and virtual host
+    // routing. The upstream container is already targeted by the TCP
+    // connection address.
     let mut builder = HyperRequest::builder()
         .method(method)
-        .uri(upstream_uri)
-        .header("host", upstream_addr);
+        .uri(upstream_uri);
 
     for (name, value) in headers.iter() {
-        if name != "host" {
-            builder = builder.header(name.clone(), value.clone());
-        }
+        builder = builder.header(name.clone(), value.clone());
     }
 
     let upstream_req = builder
