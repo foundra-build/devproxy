@@ -100,7 +100,7 @@ Verify DNS resolves:
 dig test.<chosen-domain> @127.0.0.1
 ```
 
-Expect `127.0.0.1` in the response.
+Expect `127.0.0.1` in the response. Note: `dig @127.0.0.1` queries dnsmasq directly and confirms it's working. Browsers will resolve correctly via `/etc/resolver/`, but `curl` on macOS does **not** use `/etc/resolver/` — see the curl note in Step 6.
 
 ### Linux (dnsmasq via systemd-resolved or standalone)
 
@@ -156,8 +156,14 @@ services:
 ```bash
 devproxy up
 # => https://<slug>.<domain>
-curl -s https://<slug>.<domain>  # should return nginx welcome page
+devproxy open  # opens in browser — best way to verify on macOS
 devproxy down  # clean up test
+```
+
+**Note on curl (macOS):** `curl` does not use `/etc/resolver/` for DNS, so it will fail with exit code 6 even when browsers resolve fine. To test with curl, use `--resolve`:
+
+```bash
+curl --resolve <slug>.<domain>:443:127.0.0.1 https://<slug>.<domain>
 ```
 
 ## Step 7: Verify Everything Works

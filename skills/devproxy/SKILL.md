@@ -54,6 +54,12 @@ devproxy ls       # route registered?
 devproxy open     # opens URL in browser
 ```
 
+**Testing with curl on macOS:** `curl` does not use `/etc/resolver/` for DNS, so bare `curl https://<slug>.<domain>` will fail with exit code 6 even though browsers work fine. Use `--resolve` to bypass DNS:
+
+```bash
+curl --resolve <slug>.<domain>:443:127.0.0.1 https://<slug>.<domain>
+```
+
 ## How It Works
 
 - `devproxy up` finds a free host port, writes `.devproxy-override.yml`, and runs `docker compose -f docker-compose.yml -f .devproxy-override.yml --project-name <slug> up -d`
@@ -77,6 +83,7 @@ devproxy open     # opens URL in browser
 | "Connection refused" on HTTPS | Check daemon: `devproxy status`. Restart with `devproxy init` |
 | Port 443 requires sudo (Linux) | Normally handled by systemd socket activation. Fallback: `sudo setcap cap_net_bind_service=+ep $(which devproxy)` or use `devproxy init --port 8443` |
 | DNS not resolving `*.mysite.dev` | Add `127.0.0.1 slug.mysite.dev` to `/etc/hosts` or configure dnsmasq |
+| `curl` fails but browser works (macOS) | `curl` doesn't use `/etc/resolver/`. Use `curl --resolve <slug>.<domain>:443:127.0.0.1 https://<slug>.<domain>` |
 | `.devproxy-override.yml` in git | Add it to `.gitignore` |
 | Slug changed after restart | Slugs are random per `devproxy up`. Pin not yet supported |
 | Binary "killed" (exit code 137) on macOS | Gatekeeper quarantine. Re-run the install script or run: `xattr -cr $(which devproxy) && codesign --force --sign - $(which devproxy)` |
