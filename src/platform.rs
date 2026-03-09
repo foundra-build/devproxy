@@ -150,7 +150,7 @@ pub fn generate_systemd_service_unit(
     config_dir: Option<&str>,
 ) -> String {
     let env_line = match config_dir {
-        Some(dir) => format!("Environment=DEVPROXY_CONFIG_DIR={dir}\n"),
+        Some(dir) => format!("Environment=\"DEVPROXY_CONFIG_DIR={dir}\"\n"),
         None => String::new(),
     };
 
@@ -162,7 +162,7 @@ After={SYSTEMD_UNIT_NAME}.socket
 
 [Service]
 Type=simple
-{env_line}ExecStart={binary_path} daemon --port {port}
+{env_line}ExecStart="{binary_path}" daemon --port {port}
 Restart=on-failure
 RestartSec=5
 
@@ -343,13 +343,13 @@ fn bootout_launchagent() -> Result<()> {
     let uid = unsafe { libc::getuid() };
     // Suppress stderr — bootout failing is expected on fresh install
     // (agent not loaded) and during install's pre-bootstrap cleanup.
-    let output = std::process::Command::new("launchctl")
+    let status = std::process::Command::new("launchctl")
         .args(["bootout", &format!("gui/{uid}/{LAUNCHD_LABEL}")])
         .stderr(std::process::Stdio::null())
         .status()
         .context("failed to run launchctl bootout")?;
 
-    if !output.success() {
+    if !status.success() {
         // Not fatal — agent may not be loaded. Callers handle this.
     }
     Ok(())
@@ -689,7 +689,7 @@ mod tests {
         let unit =
             generate_systemd_service_unit("/usr/local/bin/devproxy", 443, Some("/tmp/test-config"));
         assert!(
-            unit.contains("Environment=DEVPROXY_CONFIG_DIR=/tmp/test-config"),
+            unit.contains("Environment=\"DEVPROXY_CONFIG_DIR=/tmp/test-config\""),
             "should have config dir env"
         );
     }

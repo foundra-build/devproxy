@@ -24,6 +24,11 @@ pub async fn acquire_listener() -> Result<Option<TcpListener>> {
     match acquire_activated_fds()? {
         Some(fds) if !fds.is_empty() => {
             let fd = fds[0];
+            // Close any extra fds beyond the first — we only use one listener.
+            // Without this, extra socket-activated fds would be leaked.
+            for &extra_fd in &fds[1..] {
+                unsafe { libc::close(extra_fd) };
+            }
             // Safety: the fd is passed to us by launchd/systemd and is a valid
             // bound TCP socket. We take ownership (no dup needed — the OS
             // expects us to consume it).

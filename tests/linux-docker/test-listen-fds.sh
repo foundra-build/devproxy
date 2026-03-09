@@ -71,7 +71,7 @@ for i in range(50):
             s.close()
             print('Daemon started successfully with LISTEN_FDS')
             break
-        except:
+        except Exception:
             pass
     time.sleep(0.1)
 else:
