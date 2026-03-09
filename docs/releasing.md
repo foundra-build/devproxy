@@ -46,5 +46,6 @@ After creating a release, verify the install script works:
 curl -fsSL https://raw.githubusercontent.com/foundra-build/devproxy/main/install.sh | sh
 
 # Test specific version
-DEVPROXY_VERSION=v0.0.1 curl -fsSL https://raw.githubusercontent.com/foundra-build/devproxy/main/install.sh | sh
+export DEVPROXY_VERSION=v0.0.1
+curl -fsSL https://raw.githubusercontent.com/foundra-build/devproxy/main/install.sh | sh
 ```

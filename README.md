@@ -33,7 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/foundra-build/devproxy/main/install
 To install a specific version:
 
 ```bash
-DEVPROXY_VERSION=v0.0.1 curl -fsSL https://raw.githubusercontent.com/foundra-build/devproxy/main/install.sh | sh
+export DEVPROXY_VERSION=v0.0.1
+curl -fsSL https://raw.githubusercontent.com/foundra-build/devproxy/main/install.sh | sh
 ```
 
 ## Quick Start
