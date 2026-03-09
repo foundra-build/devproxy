@@ -54,17 +54,33 @@ pub fn generate_launchagent_plist(
     let binary_path = xml_escape(binary_path);
     let config_dir_escaped = config_dir.map(xml_escape);
 
-    let env_block = match &config_dir_escaped {
-        Some(dir) => format!(
-            r#"    <key>EnvironmentVariables</key>
-    <dict>
-        <key>DEVPROXY_CONFIG_DIR</key>
-        <string>{dir}</string>
-    </dict>
+    // launchd provides a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) that
+    // excludes /usr/local/bin (Docker on macOS) and ~/.local/bin. Include
+    // the common paths so the daemon can find docker, etc.
+    let path_value = std::env::var("PATH").unwrap_or_else(|_| {
+        "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string()
+    });
+    let path_value = xml_escape(&path_value);
+
+    let mut env_entries = format!(
+        r#"        <key>PATH</key>
+        <string>{path_value}</string>
 "#
-        ),
-        None => String::new(),
-    };
+    );
+    if let Some(dir) = &config_dir_escaped {
+        env_entries.push_str(&format!(
+            r#"        <key>DEVPROXY_CONFIG_DIR</key>
+        <string>{dir}</string>
+"#
+        ));
+    }
+
+    let env_block = format!(
+        r#"    <key>EnvironmentVariables</key>
+    <dict>
+{env_entries}    </dict>
+"#
+    );
 
     // Use the same log path as Config::daemon_log_path() — inside the config dir.
     // When config_dir is overridden, log goes there; otherwise use the default.
@@ -593,8 +609,13 @@ mod tests {
         );
         assert!(plist.contains("127.0.0.1"), "should bind to localhost only");
         assert!(
-            !plist.contains("EnvironmentVariables"),
-            "should not have env vars when config_dir is None"
+            plist.contains("EnvironmentVariables"),
+            "should have env vars (at least PATH)"
+        );
+        assert!(plist.contains("<key>PATH</key>"), "should have PATH");
+        assert!(
+            !plist.contains("DEVPROXY_CONFIG_DIR"),
+            "should not have DEVPROXY_CONFIG_DIR when config_dir is None"
         );
         assert!(
             plist.contains("daemon.log"),
@@ -614,6 +635,7 @@ mod tests {
             plist.contains("EnvironmentVariables"),
             "should have env vars"
         );
+        assert!(plist.contains("<key>PATH</key>"), "should have PATH");
         assert!(
             plist.contains("DEVPROXY_CONFIG_DIR"),
             "should have config dir key"
