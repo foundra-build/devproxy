@@ -20,7 +20,7 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         eprintln!("generating CA certificate...");
         let (ca_cert_pem, ca_key_pem) = cert::generate_ca()?;
         cert::write_pem(&ca_cert_path, &ca_cert_pem)?;
-        cert::write_pem(&ca_key_path, &ca_key_pem)?;
+        cert::write_key_pem(&ca_key_path, &ca_key_pem)?;
         eprintln!("{} CA certificate generated", "ok:".green());
 
         // Trust the CA
@@ -53,7 +53,7 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         eprintln!("generating wildcard TLS certificate for *.{domain}...");
         let (tls_cert_pem, tls_key_pem) = cert::generate_wildcard_cert(domain, &ca_cert_pem, &ca_key_pem)?;
         cert::write_pem(&tls_cert_path, &tls_cert_pem)?;
-        cert::write_pem(&tls_key_path, &tls_key_pem)?;
+        cert::write_key_pem(&tls_key_path, &tls_key_pem)?;
         eprintln!("{} TLS certificate generated", "ok:".green());
     }
 
@@ -78,7 +78,7 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
 
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit());
+            .stderr(std::process::Stdio::null());
 
         let child = cmd.spawn().context("could not spawn daemon")?;
         eprintln!("{} daemon started (pid: {})", "ok:".green(), child.id());

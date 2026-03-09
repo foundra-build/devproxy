@@ -426,10 +426,10 @@ fn test_full_e2e_workflow() {
         .env("DEVPROXY_CONFIG_DIR", &config_dir)
         .output()
         .expect("failed to run devproxy ls");
-    let ls_stderr = String::from_utf8_lossy(&ls_output.stderr);
+    let ls_stdout = String::from_utf8_lossy(&ls_output.stdout);
     assert!(
-        ls_stderr.contains(slug),
-        "ls should show our slug '{slug}': {ls_stderr}"
+        ls_stdout.contains(slug),
+        "ls should show our slug '{slug}': {ls_stdout}"
     );
 
     // Curl through the proxy (--resolve bypasses DNS, --cacert trusts our test CA)
@@ -535,8 +535,8 @@ fn test_self_healing_route_removed_on_container_die() {
         .env("DEVPROXY_CONFIG_DIR", &config_dir)
         .output()
         .expect("failed to ls");
-    let ls_before_stderr = String::from_utf8_lossy(&ls_before.stderr);
-    assert!(ls_before_stderr.contains(slug), "route should exist before kill: {ls_before_stderr}");
+    let ls_before_stdout = String::from_utf8_lossy(&ls_before.stdout);
+    assert!(ls_before_stdout.contains(slug), "route should exist before kill: {ls_before_stdout}");
 
     // Kill container externally (not via devproxy)
     let kill_status = Command::new("docker")
@@ -557,10 +557,10 @@ fn test_self_healing_route_removed_on_container_die() {
         .env("DEVPROXY_CONFIG_DIR", &config_dir)
         .output()
         .expect("failed to ls");
-    let ls_after_stderr = String::from_utf8_lossy(&ls_after.stderr);
+    let ls_after_stdout = String::from_utf8_lossy(&ls_after.stdout);
     assert!(
-        !ls_after_stderr.contains(slug) || ls_after_stderr.contains("no active"),
-        "route should be removed after external kill: {ls_after_stderr}"
+        !ls_after_stdout.contains(slug) || ls_after_stdout.contains("no active"),
+        "route should be removed after external kill: {ls_after_stdout}"
     );
 }
 
@@ -623,10 +623,10 @@ fn test_daemon_restart_rebuilds_routes() {
         .env("DEVPROXY_CONFIG_DIR", &config_dir)
         .output()
         .expect("failed to ls");
-    let ls_stderr = String::from_utf8_lossy(&ls_output.stderr);
+    let ls_stdout = String::from_utf8_lossy(&ls_output.stdout);
     assert!(
-        ls_stderr.contains(slug),
-        "route should be rebuilt after daemon restart: {ls_stderr}"
+        ls_stdout.contains(slug),
+        "route should be rebuilt after daemon restart: {ls_stdout}"
     );
 }
 

@@ -10,18 +10,18 @@ pub async fn run() -> Result<()> {
     match response {
         Response::Routes { routes } => {
             if routes.is_empty() {
-                eprintln!("no active projects");
+                println!("no active projects");
             } else {
-                eprintln!("{:<30} {:<10}", "SLUG".bold(), "PORT".bold());
+                println!("{:<30} {:<10}", "SLUG".bold(), "PORT".bold());
                 for route in &routes {
-                    eprintln!(
+                    println!(
                         "{:<30} {:<10}",
                         format!("https://{}", route.slug).cyan(),
                         route.port
                     );
                 }
-                eprintln!();
-                eprintln!("{} active project(s)", routes.len());
+                println!();
+                println!("{} active project(s)", routes.len());
             }
         }
         Response::Error { message } => bail!("daemon error: {message}"),

@@ -41,10 +41,10 @@ pub async fn run_daemon(port: u16) -> Result<()> {
     eprintln!("IPC listening on {}", socket_path.display());
 
     // Set up HTTPS listener
-    let tcp_listener = TcpListener::bind(format!("0.0.0.0:{port}"))
+    let tcp_listener = TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
         .with_context(|| format!("could not bind to port {port}"))?;
-    eprintln!("HTTPS proxy listening on :{port}");
+    eprintln!("HTTPS proxy listening on 127.0.0.1:{port}");
 
     // Run all three tasks
     let r1 = router.clone();
@@ -219,18 +219,20 @@ async fn proxy_to_upstream(
         .map_err(|e| anyhow::anyhow!("failed to collect body: {e}"))?
         .to_bytes();
 
-    let mut upstream_req = HyperRequest::builder()
+    // Build headers on the builder before constructing the request
+    let mut builder = HyperRequest::builder()
         .method(method)
-        .uri(upstream_uri)
-        .body(Full::new(body))
-        .context("failed to build upstream request")?;
+        .uri(upstream_uri);
 
-    // Copy headers (except host)
     for (name, value) in headers.iter() {
         if name != "host" {
-            upstream_req.headers_mut().insert(name.clone(), value.clone());
+            builder = builder.header(name.clone(), value.clone());
         }
     }
+
+    let upstream_req = builder
+        .body(Full::new(body))
+        .context("failed to build upstream request")?;
 
     let resp = sender
         .send_request(upstream_req)
@@ -246,14 +248,16 @@ async fn proxy_to_upstream(
         .map_err(|e| anyhow::anyhow!("failed to collect upstream response: {e}"))?
         .to_bytes();
 
-    let mut response = HyperResponse::builder()
-        .status(status)
-        .body(Full::new(body))
-        .context("failed to build response")?;
+    let mut resp_builder = HyperResponse::builder()
+        .status(status);
 
     for (name, value) in resp_headers.iter() {
-        response.headers_mut().insert(name.clone(), value.clone());
+        resp_builder = resp_builder.header(name.clone(), value.clone());
     }
+
+    let response = resp_builder
+        .body(Full::new(body))
+        .context("failed to build response")?;
 
     Ok(response)
 }

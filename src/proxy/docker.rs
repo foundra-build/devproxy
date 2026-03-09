@@ -28,8 +28,9 @@ struct NetworkSettings {
 
 #[derive(Debug, Deserialize)]
 struct PortBinding {
+    #[allow(dead_code)]
     #[serde(rename = "HostIp")]
-    _host_ip: Option<String>,
+    host_ip: Option<String>,
     #[serde(rename = "HostPort")]
     host_port: Option<String>,
 }

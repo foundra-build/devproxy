@@ -62,12 +62,34 @@ pub fn generate_wildcard_cert(
     Ok((cert.pem(), key_pair.serialize_pem()))
 }
 
-/// Write PEM data to a file, creating parent directories
+/// Write PEM data to a file, creating parent directories.
+/// If `is_key` is true, restricts file permissions to owner-only (0600).
 pub fn write_pem(path: &Path, pem: &str) -> Result<()> {
+    write_pem_with_mode(path, pem, false)
+}
+
+/// Write a private key PEM file with restrictive permissions (0600).
+pub fn write_key_pem(path: &Path, pem: &str) -> Result<()> {
+    write_pem_with_mode(path, pem, true)
+}
+
+fn write_pem_with_mode(path: &Path, pem: &str, is_key: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, pem)?;
+    if is_key {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(pem.as_bytes())?;
+    } else {
+        std::fs::write(path, pem)?;
+    }
     Ok(())
 }
 
