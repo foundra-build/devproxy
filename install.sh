@@ -2,7 +2,7 @@
 set -eu
 
 DEVPROXY_VERSION="${DEVPROXY_VERSION:-latest}"
-DEVPROXY_INSTALL_DIR="${DEVPROXY_INSTALL_DIR:-/usr/local/bin}"
+DEVPROXY_INSTALL_DIR="${DEVPROXY_INSTALL_DIR:-${HOME}/.local/bin}"
 DEVPROXY_INSTALL_BASE_URL="${DEVPROXY_INSTALL_BASE_URL:-https://github.com/foundra-build/devproxy/releases}"
 
 main() {
@@ -12,6 +12,11 @@ main() {
     download_binary
     verify_installation
     echo "devproxy installed successfully to ${DEVPROXY_INSTALL_DIR}/devproxy"
+    case ":${PATH}:" in
+        *":${DEVPROXY_INSTALL_DIR}:"*) ;;
+        *) echo "Note: ${DEVPROXY_INSTALL_DIR} is not in your PATH. Add it with:" >&2
+           echo "  export PATH=\"${DEVPROXY_INSTALL_DIR}:\$PATH\"" >&2 ;;
+    esac
 }
 
 detect_platform() {

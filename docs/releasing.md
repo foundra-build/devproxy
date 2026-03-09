@@ -35,7 +35,7 @@ The install script (`install.sh`) expects this naming convention.
 The install script at `install.sh` downloads the correct binary for the user's platform.
 It supports:
 - `DEVPROXY_VERSION` — pin to a specific version (e.g., `v0.0.1`), defaults to `latest`
-- `DEVPROXY_INSTALL_DIR` — custom install directory, defaults to `/usr/local/bin`
+- `DEVPROXY_INSTALL_DIR` — custom install directory, defaults to `~/.local/bin`
 
 ## Verification
 
