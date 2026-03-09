@@ -136,7 +136,8 @@ fn download_file(url: &str, dest: &Path) -> Result<()> {
 }
 
 /// Set permissions and codesign the binary at `path`.
-fn prepare_binary(path: &Path) -> Result<()> {
+/// Used by both update (for downloaded binaries) and init (for the daemon binary copy).
+pub(crate) fn prepare_binary(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

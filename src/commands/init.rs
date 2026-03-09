@@ -316,8 +316,8 @@ fn spawn_daemon_directly(exe: &std::path::Path, port: u16, domain: &str) -> Resu
 }
 
 /// Copy the current binary to the dedicated daemon binary path.
-/// Creates the parent directory if needed, sets executable permissions,
-/// and codesigns on macOS.
+/// Creates the parent directory if needed, then delegates to
+/// `update::prepare_binary` for permissions and codesigning.
 pub fn install_daemon_binary(src: &std::path::Path, dest: &std::path::Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
@@ -326,24 +326,7 @@ pub fn install_daemon_binary(src: &std::path::Path, dest: &std::path::Path) -> R
     std::fs::copy(src, dest)
         .with_context(|| format!("could not copy binary to {}", dest.display()))?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))
-            .context("failed to set permissions on daemon binary")?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("xattr")
-            .arg("-cr")
-            .arg(dest)
-            .output();
-        let _ = std::process::Command::new("codesign")
-            .args(["--force", "--sign", "-"])
-            .arg(dest)
-            .output();
-    }
+    super::update::prepare_binary(dest)?;
 
     eprintln!("{} daemon binary installed at {}", "ok:".green(), dest.display());
     Ok(())
@@ -508,7 +491,7 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         }
 
         if !activated {
-            spawn_daemon_directly(&exe, port, domain)?;
+            spawn_daemon_directly(&daemon_bin, port, domain)?;
         }
     }
 

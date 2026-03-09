@@ -63,8 +63,16 @@ impl Config {
     /// launchd's KeepAlive monitoring of the daemon path does not interfere
     /// with normal CLI invocations (e.g., `devproxy --version`).
     ///
-    /// Path: `~/.local/share/devproxy/devproxy-daemon`
+    /// Default path (via `dirs::data_dir()`):
+    /// - macOS: `~/Library/Application Support/devproxy/devproxy-daemon`
+    /// - Linux: `~/.local/share/devproxy/devproxy-daemon`
+    ///
     /// Respects `DEVPROXY_DATA_DIR` env var for test isolation.
+    ///
+    /// Note: this path is only resolved by CLI commands (`init`, `update`)
+    /// to install/update the daemon binary. The daemon process itself never
+    /// calls this function, so `DEVPROXY_DATA_DIR` does not need to be
+    /// propagated into plist/unit environment variables.
     pub fn daemon_binary_path() -> Result<PathBuf> {
         if let Ok(dir) = std::env::var("DEVPROXY_DATA_DIR") {
             return Ok(PathBuf::from(dir).join("devproxy-daemon"));
