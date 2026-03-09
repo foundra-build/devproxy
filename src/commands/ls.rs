@@ -1,21 +1,7 @@
 use crate::config::{self, Config};
-use crate::ipc::{self, Request, Response, RouteInfo};
+use crate::ipc::{self, Request, Response};
 use anyhow::{Result, bail};
 use colored::Colorize;
-
-/// Format a single route line, with optional `*` marker for current project.
-fn format_route_line(route: &RouteInfo, current_slug: Option<&str>) -> String {
-    let marker = match current_slug {
-        Some(s) if s == route.slug => "* ",
-        _ => "  ",
-    };
-    format!(
-        "{}{:<40} {:<10}",
-        marker,
-        format!("https://{}", route.slug),
-        route.port
-    )
-}
 
 pub async fn run() -> Result<()> {
     let socket_path = Config::socket_path()?;
@@ -35,9 +21,26 @@ pub async fn run() -> Result<()> {
             if routes.is_empty() {
                 println!("no active projects");
             } else {
-                println!("  {:<40} {:<10}", "URL".bold(), "PORT".bold());
+                // Compute column width dynamically based on longest URL
+                let url_width = routes
+                    .iter()
+                    .map(|r| format!("https://{}", r.slug).len())
+                    .max()
+                    .unwrap_or(3)
+                    .max(3); // at least "URL".len()
+
+                println!("  {:<width$} {}", "URL".bold(), "PORT".bold(), width = url_width + 2);
                 for route in &routes {
-                    println!("{}", format_route_line(route, current_slug.as_deref()));
+                    let is_current = current_slug.as_deref() == Some(&route.slug);
+                    let marker = if is_current { "* " } else { "  " };
+                    let url = format!("https://{}", route.slug);
+                    println!(
+                        "{}{:<width$} {}",
+                        marker,
+                        url.cyan(),
+                        route.port,
+                        width = url_width + 2
+                    );
                 }
                 println!();
                 println!("{} active project(s)", routes.len());
@@ -52,8 +55,18 @@ pub async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::ipc::RouteInfo;
+
+    /// Format a single route line, with optional `*` marker for current project.
+    /// Used only in tests to verify marker logic independently of colored output.
+    fn format_route_line(route: &RouteInfo, current_slug: Option<&str>) -> String {
+        let marker = match current_slug {
+            Some(s) if s == route.slug => "* ",
+            _ => "  ",
+        };
+        let url = format!("https://{}", route.slug);
+        format!("{}{} {}", marker, url, route.port)
+    }
 
     #[test]
     fn format_route_with_current_marker() {
@@ -62,7 +75,7 @@ mod tests {
             port: 51234,
         };
         let line = format_route_line(&route, Some("swift-penguin-devproxy.mysite.dev"));
-        assert!(line.contains("*"), "current project should have * marker: {line}");
+        assert!(line.starts_with("* "), "current project should have * marker: {line}");
     }
 
     #[test]
@@ -72,7 +85,7 @@ mod tests {
             port: 51235,
         };
         let line = format_route_line(&route, Some("swift-penguin-devproxy.mysite.dev"));
-        assert!(!line.contains("*"), "non-current project should not have * marker: {line}");
+        assert!(line.starts_with("  "), "non-current project should not have * marker: {line}");
     }
 
     #[test]
@@ -82,6 +95,6 @@ mod tests {
             port: 51234,
         };
         let line = format_route_line(&route, None);
-        assert!(!line.contains("*"), "no current project means no marker: {line}");
+        assert!(line.starts_with("  "), "no current project means no marker: {line}");
     }
 }

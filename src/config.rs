@@ -293,7 +293,7 @@ pub fn compose_slug(random_slug: &str, app_name: &str) -> String {
     if composite.len() <= 63 {
         return composite;
     }
-    composite[..63].trim_end_matches('-').to_string()
+    composite.chars().take(63).collect::<String>().trim_end_matches('-').to_string()
 }
 
 /// Find a free ephemeral port
