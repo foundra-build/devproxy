@@ -326,13 +326,22 @@ mod tests {
 
     #[test]
     fn test_launchagent_plist_contains_required_fields() {
-        let plist = generate_launchagent_plist("/usr/local/bin/devproxy", 443);
+        let plist = generate_launchagent_plist("/usr/local/bin/devproxy", 443, None);
         assert!(plist.contains("com.devproxy.daemon"), "should have label");
         assert!(plist.contains("/usr/local/bin/devproxy"), "should have binary path");
         assert!(plist.contains("<key>Sockets</key>"), "should have Sockets");
         assert!(plist.contains("443"), "should have port 443");
         assert!(plist.contains("Listeners"), "should have socket name matching code");
         assert!(plist.contains("127.0.0.1"), "should bind to localhost only");
+        assert!(!plist.contains("EnvironmentVariables"), "should not have env vars when config_dir is None");
+    }
+
+    #[test]
+    fn test_launchagent_plist_with_config_dir() {
+        let plist = generate_launchagent_plist("/usr/local/bin/devproxy", 443, Some("/tmp/test-config"));
+        assert!(plist.contains("EnvironmentVariables"), "should have env vars");
+        assert!(plist.contains("DEVPROXY_CONFIG_DIR"), "should have config dir key");
+        assert!(plist.contains("/tmp/test-config"), "should have config dir value");
     }
 
     #[test]
@@ -350,21 +359,28 @@ mod tests {
 
     #[test]
     fn test_systemd_service_unit_contains_binary_and_port() {
-        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 443);
+        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 443, None);
         assert!(unit.contains("/usr/local/bin/devproxy"), "should have binary path");
         assert!(unit.contains("daemon --port 443"), "should run daemon subcommand with port");
         assert!(unit.contains("Type=simple"), "should have Type=simple");
+        assert!(!unit.contains("Environment="), "should not have Environment when config_dir is None");
     }
 
     #[test]
     fn test_systemd_service_unit_custom_port() {
-        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 8443);
+        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 8443, None);
         assert!(unit.contains("daemon --port 8443"), "should use custom port in ExecStart");
     }
 
     #[test]
+    fn test_systemd_service_unit_with_config_dir() {
+        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 443, Some("/tmp/test-config"));
+        assert!(unit.contains("Environment=DEVPROXY_CONFIG_DIR=/tmp/test-config"), "should have config dir env");
+    }
+
+    #[test]
     fn test_systemd_service_references_socket() {
-        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 443);
+        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 443, None);
         assert!(unit.contains("Requires=devproxy.socket"), "should require socket unit");
     }
 }
@@ -412,7 +428,21 @@ pub fn is_socket_activation_disabled() -> bool {
 
 /// Generate the LaunchAgent plist XML for macOS.
 /// The plist uses Sockets to have launchd bind the port and pass the fd.
-pub fn generate_launchagent_plist(binary_path: &str, port: u16) -> String {
+/// If `config_dir` is Some, an `EnvironmentVariables` dict is included
+/// so the daemon uses the specified config directory instead of the default.
+pub fn generate_launchagent_plist(binary_path: &str, port: u16, config_dir: Option<&str>) -> String {
+    let env_block = match config_dir {
+        Some(dir) => format!(
+            r#"    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DEVPROXY_CONFIG_DIR</key>
+        <string>{dir}</string>
+    </dict>
+"#
+        ),
+        None => String::new(),
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -439,7 +469,7 @@ pub fn generate_launchagent_plist(binary_path: &str, port: u16) -> String {
             <string>stream</string>
         </dict>
     </dict>
-    <key>KeepAlive</key>
+{env_block}    <key>KeepAlive</key>
     <true/>
     <key>RunAtLoad</key>
     <true/>
@@ -471,7 +501,13 @@ pub fn generate_systemd_socket_unit(port: u16) -> String {
 /// Generate a systemd .service unit for Linux.
 /// Includes `--port` so that if socket activation fails and the daemon
 /// falls back to `TcpListener::bind`, it binds the correct port.
-pub fn generate_systemd_service_unit(binary_path: &str, port: u16) -> String {
+/// If `config_dir` is Some, an `Environment=` directive is included.
+pub fn generate_systemd_service_unit(binary_path: &str, port: u16, config_dir: Option<&str>) -> String {
+    let env_line = match config_dir {
+        Some(dir) => format!("Environment=DEVPROXY_CONFIG_DIR={dir}\n         "),
+        None => String::new(),
+    };
+
     format!(
         "[Unit]\n\
          Description=devproxy HTTPS reverse proxy daemon\n\
@@ -480,7 +516,7 @@ pub fn generate_systemd_service_unit(binary_path: &str, port: u16) -> String {
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={binary_path} daemon --port {port}\n\
+         {env_line}ExecStart={binary_path} daemon --port {port}\n\
          Restart=on-failure\n\
          RestartSec=5\n\
          \n\
@@ -605,10 +641,14 @@ pub fn restart_daemon() -> Result<bool> {
 /// Respects `DEVPROXY_NO_SOCKET_ACTIVATION` — returns Err so caller
 /// falls through to `spawn_daemon_directly`.
 ///
+/// `config_dir` is an optional override for `DEVPROXY_CONFIG_DIR`. When
+/// `Some`, it is embedded in the plist/unit file so the daemon uses the
+/// specified directory. Pass `None` for the default (`~/.config/devproxy/`).
+///
 /// macOS: writes plist and runs `launchctl bootstrap`.
 /// Linux: writes systemd units and runs `systemctl --user enable --now`.
 ///        Falls back to `setcap` if systemd is not available.
-pub fn install_daemon(binary_path: &Path, port: u16) -> Result<()> {
+pub fn install_daemon(binary_path: &Path, port: u16, config_dir: Option<&str>) -> Result<()> {
     if is_socket_activation_disabled() {
         bail!("socket activation disabled via DEVPROXY_NO_SOCKET_ACTIVATION");
     }
@@ -619,15 +659,15 @@ pub fn install_daemon(binary_path: &Path, port: u16) -> Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        install_launchagent(binary_str, port)?;
+        install_launchagent(binary_str, port, config_dir)?;
     }
     #[cfg(target_os = "linux")]
     {
-        install_linux_daemon(binary_str, binary_path, port)?;
+        install_linux_daemon(binary_str, binary_path, port, config_dir)?;
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (binary_str, port);
+        let _ = (binary_str, port, config_dir);
         bail!("daemon installation is not supported on this platform");
     }
 
@@ -680,7 +720,7 @@ fn bootout_launchagent() -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn install_launchagent(binary_path: &str, port: u16) -> Result<()> {
+fn install_launchagent(binary_path: &str, port: u16, config_dir: Option<&str>) -> Result<()> {
     use colored::Colorize;
 
     let plist_path = launchagent_plist_path()?;
@@ -691,13 +731,13 @@ fn install_launchagent(binary_path: &str, port: u16) -> Result<()> {
     std::fs::create_dir_all(plist_dir)
         .with_context(|| format!("could not create {}", plist_dir.display()))?;
 
-    // If already installed, bootout first
-    if plist_path.exists() {
-        eprintln!("{} removing existing LaunchAgent...", "info:".cyan());
-        let _ = bootout_launchagent();
-    }
+    // Silently try to bootout any existing agent. This is a no-op if
+    // kill_stale_daemon already booted it out — we just ensure the
+    // launchd session is clean before bootstrap. No warning on failure
+    // (the agent may not be loaded, which is expected).
+    let _ = bootout_launchagent();
 
-    let plist_content = generate_launchagent_plist(binary_path, port);
+    let plist_content = generate_launchagent_plist(binary_path, port, config_dir);
     std::fs::write(&plist_path, &plist_content)
         .with_context(|| format!("could not write plist at {}", plist_path.display()))?;
     eprintln!("{} wrote {}", "ok:".green(), plist_path.display());
@@ -738,9 +778,9 @@ fn uninstall_launchagent() -> Result<()> {
 // ---- Linux: systemd preferred, setcap fallback -----------------------------
 
 #[cfg(target_os = "linux")]
-fn install_linux_daemon(binary_str: &str, binary_path: &Path, port: u16) -> Result<()> {
+fn install_linux_daemon(binary_str: &str, binary_path: &Path, port: u16, config_dir: Option<&str>) -> Result<()> {
     // Try systemd first
-    match install_systemd_units(binary_str, port) {
+    match install_systemd_units(binary_str, port, config_dir) {
         Ok(()) => return Ok(()),
         Err(e) => {
             use colored::Colorize;
@@ -795,7 +835,7 @@ fn apply_setcap(binary_path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn install_systemd_units(binary_path: &str, port: u16) -> Result<()> {
+fn install_systemd_units(binary_path: &str, port: u16, config_dir: Option<&str>) -> Result<()> {
     use colored::Colorize;
 
     // Check if systemctl is available before writing files
@@ -818,7 +858,7 @@ fn install_systemd_units(binary_path: &str, port: u16) -> Result<()> {
         .with_context(|| format!("could not write {}", socket_path.display()))?;
     eprintln!("{} wrote {}", "ok:".green(), socket_path.display());
 
-    std::fs::write(&service_path, generate_systemd_service_unit(binary_path, port))
+    std::fs::write(&service_path, generate_systemd_service_unit(binary_path, port, config_dir))
         .with_context(|| format!("could not write {}", service_path.display()))?;
     eprintln!("{} wrote {}", "ok:".green(), service_path.display());
 
@@ -901,13 +941,22 @@ mod tests {
 
     #[test]
     fn test_launchagent_plist_contains_required_fields() {
-        let plist = generate_launchagent_plist("/usr/local/bin/devproxy", 443);
+        let plist = generate_launchagent_plist("/usr/local/bin/devproxy", 443, None);
         assert!(plist.contains("com.devproxy.daemon"), "should have label");
         assert!(plist.contains("/usr/local/bin/devproxy"), "should have binary path");
         assert!(plist.contains("<key>Sockets</key>"), "should have Sockets");
         assert!(plist.contains("443"), "should have port 443");
         assert!(plist.contains("Listeners"), "should have socket name matching code");
         assert!(plist.contains("127.0.0.1"), "should bind to localhost only");
+        assert!(!plist.contains("EnvironmentVariables"), "should not have env vars when config_dir is None");
+    }
+
+    #[test]
+    fn test_launchagent_plist_with_config_dir() {
+        let plist = generate_launchagent_plist("/usr/local/bin/devproxy", 443, Some("/tmp/test-config"));
+        assert!(plist.contains("EnvironmentVariables"), "should have env vars");
+        assert!(plist.contains("DEVPROXY_CONFIG_DIR"), "should have config dir key");
+        assert!(plist.contains("/tmp/test-config"), "should have config dir value");
     }
 
     #[test]
@@ -932,21 +981,28 @@ mod tests {
 
     #[test]
     fn test_systemd_service_unit_contains_binary_and_port() {
-        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 443);
+        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 443, None);
         assert!(unit.contains("/usr/local/bin/devproxy"), "should have binary path");
         assert!(unit.contains("daemon --port 443"), "should run daemon subcommand with port");
         assert!(unit.contains("Type=simple"), "should have Type=simple");
+        assert!(!unit.contains("Environment="), "should not have Environment when config_dir is None");
     }
 
     #[test]
     fn test_systemd_service_unit_custom_port() {
-        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 8443);
+        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 8443, None);
         assert!(unit.contains("daemon --port 8443"), "should use custom port in ExecStart");
     }
 
     #[test]
+    fn test_systemd_service_unit_with_config_dir() {
+        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 443, Some("/tmp/test-config"));
+        assert!(unit.contains("Environment=DEVPROXY_CONFIG_DIR=/tmp/test-config"), "should have config dir env");
+    }
+
+    #[test]
     fn test_systemd_service_references_socket() {
-        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 443);
+        let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 443, None);
         assert!(unit.contains("Requires=devproxy.socket"), "should require socket unit");
     }
 
@@ -1010,7 +1066,10 @@ Replace the `else` branch of `if no_daemon` in `src/commands/init.rs` (lines 300
         // set, triggering the fallback path.
         let mut activated = false;
 
-        match crate::platform::install_daemon(&exe, port) {
+        // Pass DEVPROXY_CONFIG_DIR if set — the plist/unit file must
+        // embed it so the daemon uses the correct config directory.
+        let config_dir_override = std::env::var("DEVPROXY_CONFIG_DIR").ok();
+        match crate::platform::install_daemon(&exe, port, config_dir_override.as_deref()) {
             Ok(()) => {
                 // Wait for daemon to become responsive (socket activation
                 // startup may be slower than direct spawn)
@@ -2026,7 +2085,7 @@ git commit -m "style: cargo fmt"
 |------|--------|-------------|
 | `src/proxy/socket_activation.rs` | Create | Platform-specific fd acquisition from launchd/systemd |
 | `src/proxy/mod.rs` | Modify | Add socket_activation module, use it in run_daemon |
-| `src/platform.rs` | Create | LaunchAgent/systemd/setcap management with stop vs uninstall separation, file-existence guards, DEVPROXY_NO_SOCKET_ACTIVATION support, localhost-only binding |
+| `src/platform.rs` | Create | LaunchAgent/systemd/setcap management with stop vs uninstall separation, file-existence guards, DEVPROXY_NO_SOCKET_ACTIVATION support, localhost-only binding, config dir propagation |
 | `src/main.rs` | Modify | Add `mod platform;` |
 | `src/commands/init.rs` | Modify | Socket activation install with fallback, `spawn_daemon_directly` helper, `kill_stale_daemon` uses `stop_daemon()` |
 | `src/commands/update.rs` | Modify | Restart platform-managed daemon after binary replacement |
@@ -2059,10 +2118,14 @@ git commit -m "style: cargo fmt"
 
 10. **Systemd service unit includes `--port`**: `generate_systemd_service_unit(binary_path, port)` includes `--port {port}` in ExecStart. If LISTEN_FDS socket activation fails and the daemon falls back to `TcpListener::bind`, it will bind the correct port rather than the compiled-in default. This matches the macOS plist which already passes `--port`.
 
-11. **`restart_daemon()` for update flow**: `devproxy update` calls `kill_stale_daemon` (which uses `stop_daemon` = `launchctl bootout`), replaces the binary, then calls `restart_daemon()`. On macOS, `launchctl kickstart -k` kills and restarts the agent in one atomic operation without unloading it. On Linux, `systemctl --user restart` does the equivalent. Without this, macOS update would leave the agent unloaded (bootout removes it from launchd's session) while Linux would auto-restart (socket activation re-triggers) — an asymmetry. `restart_daemon()` returns `Ok(false)` if no platform-managed daemon is found, letting the caller fall through to a "run devproxy init" hint.
+11. **`restart_daemon()` for update flow**: `devproxy update` replaces the binary on disk, then calls `restart_daemon()` — no `stop_daemon`/bootout beforehand. On macOS, `launchctl kickstart -k` atomically kills and restarts the agent while keeping it loaded. On Linux, `systemctl --user restart` does the equivalent. For non-platform-managed daemons (no plist/unit), `restart_daemon()` returns `Ok(false)` and the update flow falls back to `kill_stale_daemon()` + "run devproxy init" hint.
 
 12. **`DEVPROXY_NO_SOCKET_ACTIVATION` gates fd acquisition too**: The env var check exists not only in the platform module (install/stop/restart/uninstall) but also in `acquire_listener()` in the socket_activation module. Without this, a test environment with stale `LISTEN_FDS` in the environment or launchd fds meant for another service could cause the daemon to pick up unrelated file descriptors. When the env var is set, `acquire_listener()` returns `Ok(None)` immediately, going straight to the `TcpListener::bind` fallback.
 
 13. **Docker systemd user session prerequisites**: Running `systemctl --user` in a Docker container requires: (a) `dbus` and `dbus-user-session` packages installed, (b) `XDG_RUNTIME_DIR=/run/user/{uid}` set and the directory created with correct ownership, (c) systemd user manager running for the test user (enabled via `loginctl enable-linger`), (d) `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus` set so systemctl can communicate with the user manager. The Dockerfile creates the runtime directory and enables lingering; the runner script passes both env vars via `docker exec -e` and waits for `user@1000.service` to be active before running tests. The systemd test script validates these prerequisites at the top and fails fast with a clear message if they're missing.
 
-14. **LaunchAgent test skip-if-existing guard**: The macOS launchd integration test (Task 8) checks for an existing production plist at `~/Library/LaunchAgents/com.devproxy.daemon.plist` and skips if found. Because the plist path and launchd label are global (not scoped by `DEVPROXY_CONFIG_DIR`), installing a test plist would `bootout` and overwrite the developer's real LaunchAgent. Skipping is simpler than parameterizing the label (which would thread a label argument through `generate_launchagent_plist`, `launchagent_plist_path`, `bootout_launchagent`, `install_launchagent`, and `launch_activate_socket`'s socket name). The test is already `#[ignore]`, so the skip only affects developers who have devproxy installed AND explicitly opt in.
+14. **Config dir propagation in plist/unit files**: `generate_launchagent_plist` and `generate_systemd_service_unit` accept `config_dir: Option<&str>`. When `Some`, the plist includes an `EnvironmentVariables` dict with `DEVPROXY_CONFIG_DIR`, and the systemd unit includes an `Environment=DEVPROXY_CONFIG_DIR=...` directive. `install_daemon` reads the current `DEVPROXY_CONFIG_DIR` env var and passes it through. For production use (no env var set), `None` is passed and no environment override is emitted — the daemon uses its compiled-in default. This ensures the macOS integration test (Task 8) and Linux systemd test (Task 9) work correctly: they set `DEVPROXY_CONFIG_DIR` to a test directory, and the daemon launched by launchd/systemd respects it.
+
+15. **Single bootout path on re-init**: `install_launchagent` always does a silent try-bootout (ignoring failures) before bootstrap, rather than conditionally booting out only when a plist exists. This makes install idempotent: if `kill_stale_daemon` already booted out the agent, the second bootout is a harmless no-op. If `kill_stale_daemon` failed or wasn't called, the bootout still cleans up. No confusing "removing existing LaunchAgent" warning is printed.
+
+16. **LaunchAgent test skip-if-existing guard**: The macOS launchd integration test (Task 8) checks for an existing production plist at `~/Library/LaunchAgents/com.devproxy.daemon.plist` and skips if found. Because the plist path and launchd label are global (not scoped by `DEVPROXY_CONFIG_DIR`), installing a test plist would `bootout` and overwrite the developer's real LaunchAgent. Skipping is simpler than parameterizing the label (which would thread a label argument through `generate_launchagent_plist`, `launchagent_plist_path`, `bootout_launchagent`, `install_launchagent`, and `launch_activate_socket`'s socket name). The test is already `#[ignore]`, so the skip only affects developers who have devproxy installed AND explicitly opt in.
