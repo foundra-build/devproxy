@@ -128,6 +128,7 @@ fn start_test_daemon(config_dir: &Path, port: u16) -> DaemonGuard {
     let child = Command::new(devproxy_bin())
         .args(["daemon", "--port", &port.to_string()])
         .env("DEVPROXY_CONFIG_DIR", config_dir)
+        .env("DEVPROXY_NO_SOCKET_ACTIVATION", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -198,7 +199,10 @@ fn test_cli_help() {
     assert!(stdout.contains("down"));
     assert!(stdout.contains("ls"));
     assert!(stdout.contains("status"));
-    assert!(stdout.contains("update"), "help should list the update command");
+    assert!(
+        stdout.contains("update"),
+        "help should list the update command"
+    );
     assert!(
         stdout.contains("Check for updates") || stdout.contains("self-update"),
         "help should include update command description"
@@ -227,13 +231,14 @@ fn test_cli_version() {
         "--version output should contain 'devproxy': {stdout}"
     );
     // Should contain a semver-like version string
-    let has_version = stdout
-        .split_whitespace()
-        .any(|w| {
-            let parts: Vec<&str> = w.split('.').collect();
-            parts.len() == 3 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
-        });
-    assert!(has_version, "--version output should contain a version number: {stdout}");
+    let has_version = stdout.split_whitespace().any(|w| {
+        let parts: Vec<&str> = w.split('.').collect();
+        parts.len() == 3 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
+    });
+    assert!(
+        has_version,
+        "--version output should contain a version number: {stdout}"
+    );
 }
 
 #[test]
@@ -1038,6 +1043,7 @@ fn test_reinit_kills_stale_daemon() {
             &daemon_port2.to_string(),
         ])
         .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .env("DEVPROXY_NO_SOCKET_ACTIVATION", "1")
         .output()
         .expect("failed to run devproxy init");
 
@@ -1086,5 +1092,114 @@ fn test_reinit_kills_stale_daemon() {
         0,
         "new daemon (pid {new_pid}) should be dead after cleanup"
     );
+    let _ = std::fs::remove_dir_all(&config_dir);
+}
+
+/// macOS-only: verify socket activation via launchd with an ephemeral port.
+/// Installs a real LaunchAgent plist, waits for the daemon to respond,
+/// then uninstalls. Run with: cargo test --test e2e -- --ignored test_launchd_socket_activation
+#[test]
+#[ignore]
+#[cfg(target_os = "macos")]
+fn test_launchd_socket_activation() {
+    // Safety: skip if a production LaunchAgent plist already exists.
+    // Installing a test plist would bootout and overwrite the real one,
+    // destroying the developer's existing devproxy installation.
+    let home = std::env::var("HOME").unwrap();
+    let production_plist = format!("{home}/Library/LaunchAgents/com.devproxy.daemon.plist");
+    if std::path::Path::new(&production_plist).exists() {
+        eprintln!(
+            "SKIPPED: production LaunchAgent plist exists at {production_plist}. \
+             Unload it first (launchctl bootout gui/$(id -u)/com.devproxy.daemon) \
+             to run this test."
+        );
+        return;
+    }
+
+    let config_dir = create_test_config_dir("launchd");
+    let daemon_port = find_free_port();
+
+    // Run init WITHOUT DEVPROXY_NO_SOCKET_ACTIVATION so it uses real launchd
+    let output = Command::new(devproxy_bin())
+        .args([
+            "init",
+            "--domain",
+            TEST_DOMAIN,
+            "--port",
+            &daemon_port.to_string(),
+        ])
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("failed to run devproxy init");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("launchd init stderr: {stderr}");
+
+    assert!(output.status.success(), "init should succeed: {stderr}");
+    assert!(
+        stderr.contains("daemon started"),
+        "init should report daemon started: {stderr}"
+    );
+
+    let used_socket_activation = stderr.contains("socket activation");
+
+    // Verify daemon is responsive via IPC
+    let status_output = Command::new(devproxy_bin())
+        .args(["status"])
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("failed to run status");
+    let status_stderr = String::from_utf8_lossy(&status_output.stderr);
+    assert!(
+        status_stderr.contains("running"),
+        "daemon should be running: {status_stderr}"
+    );
+
+    if used_socket_activation {
+        // Verify plist was written
+        let plist_path = format!("{home}/Library/LaunchAgents/com.devproxy.daemon.plist");
+        assert!(
+            std::path::Path::new(&plist_path).exists(),
+            "LaunchAgent plist should exist at {plist_path}"
+        );
+
+        // Read the plist and verify it references our port
+        let plist_content = std::fs::read_to_string(&plist_path).unwrap();
+        assert!(
+            plist_content.contains(&daemon_port.to_string()),
+            "plist should contain port {daemon_port}"
+        );
+    }
+
+    // Cleanup: bootout the agent and remove plist
+    if used_socket_activation {
+        let uid_output = Command::new("id").arg("-u").output().unwrap();
+        let uid = String::from_utf8_lossy(&uid_output.stdout)
+            .trim()
+            .to_string();
+        let _ = Command::new("launchctl")
+            .args(["bootout", &format!("gui/{uid}/com.devproxy.daemon")])
+            .status();
+        let _ = std::fs::remove_file(format!(
+            "{home}/Library/LaunchAgents/com.devproxy.daemon.plist"
+        ));
+    }
+
+    // Signal-based cleanup for fallback path
+    let pid_path = config_dir.join("daemon.pid");
+    if pid_path.exists() {
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
     let _ = std::fs::remove_dir_all(&config_dir);
 }

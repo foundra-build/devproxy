@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod config;
 mod ipc;
+mod platform;
 mod proxy;
 mod slugs;
 

@@ -80,6 +80,31 @@ pub fn is_devproxy_process(pid: i32) -> bool {
 /// accidental kills vanishingly improbable -- the recycled PID would also need
 /// to be named "devproxy".
 pub fn kill_stale_daemon() -> Result<()> {
+    // Try platform-specific stop first (handles launchd/systemd managed daemons).
+    // Uses stop_daemon() (not uninstall) to preserve plist/unit files.
+    // If the daemon is managed by launchd (KeepAlive=true), sending SIGTERM
+    // would just cause launchd to restart it. bootout is the correct way.
+    //
+    // stop_daemon() respects DEVPROXY_NO_SOCKET_ACTIVATION and checks for
+    // plist/unit file existence, so it won't interfere with real installed
+    // daemons when called from tests.
+    match crate::platform::stop_daemon() {
+        Ok(true) => {
+            // Platform manager stopped the daemon — give it a moment to clean up
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        Ok(false) => {
+            // No platform-managed daemon was running — no delay needed
+        }
+        Err(e) => {
+            // Not fatal — daemon may not be platform-managed
+            eprintln!(
+                "{} platform stop: {e} (falling back to signal)",
+                "info:".cyan()
+            );
+        }
+    }
+
     let pid_path = Config::pid_path()?;
     let socket_path = Config::socket_path()?;
 
@@ -209,6 +234,87 @@ fn wait_for_daemon(timeout: Duration) -> Result<()> {
     )
 }
 
+/// Fallback: spawn the daemon directly as a detached process.
+/// Used when socket activation is not available.
+fn spawn_daemon_directly(exe: &std::path::Path, port: u16, domain: &str) -> Result<()> {
+    if port < 1024 {
+        eprintln!(
+            "{} port {port} requires root privileges (sudo) in fallback mode",
+            "info:".cyan()
+        );
+    }
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["daemon", "--port", &port.to_string()]);
+
+    if let Ok(dir) = std::env::var("DEVPROXY_CONFIG_DIR") {
+        cmd.env("DEVPROXY_CONFIG_DIR", dir);
+    }
+
+    // The fallback path is taken because socket activation failed or was
+    // disabled. Tell the daemon not to attempt socket activation either,
+    // so it goes straight to TcpListener::bind().
+    cmd.env("DEVPROXY_NO_SOCKET_ACTIVATION", "1");
+
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let daemon_log_path = Config::daemon_log_path()?;
+    let daemon_log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&daemon_log_path)
+        .with_context(|| format!("could not open daemon log at {}", daemon_log_path.display()))?;
+
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(daemon_log_file));
+
+    let mut child = cmd.spawn().context("could not spawn daemon")?;
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    match wait_for_daemon(Duration::from_secs(5)) {
+        Ok(()) => {
+            eprintln!("{} daemon started (pid: {pid})", "ok:".green());
+        }
+        Err(e) => {
+            eprintln!("{} daemon failed to start: {e}", "error:".red());
+            if let Ok(log_contents) = std::fs::read_to_string(&daemon_log_path) {
+                let last_lines: Vec<&str> = log_contents.lines().rev().take(10).collect();
+                if !last_lines.is_empty() {
+                    eprintln!(
+                        "  {} daemon log ({}):",
+                        "log:".cyan(),
+                        daemon_log_path.display()
+                    );
+                    for line in last_lines.into_iter().rev() {
+                        eprintln!("    {line}");
+                    }
+                }
+            }
+            if port < 1024 {
+                eprintln!(
+                    "  {} port {port} requires root. Try: sudo devproxy init --domain {domain}",
+                    "hint:".yellow()
+                );
+            }
+            bail!("daemon failed to start. See error above.");
+        }
+    }
+
+    Ok(())
+}
+
 pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     validate_domain(domain)?;
     let config = Config {
@@ -301,88 +407,68 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         // Kill any stale daemon from a previous init
         kill_stale_daemon()?;
 
-        if port < 1024 {
-            eprintln!(
-                "{} port {port} requires root privileges (sudo)",
-                "info:".cyan()
-            );
-        }
-
         eprintln!("starting daemon on port {port}...");
         let exe = std::env::current_exe().context("could not determine binary path")?;
 
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.args(["daemon", "--port", &port.to_string()]);
+        // Try platform-specific socket activation (launchd on macOS,
+        // systemd on Linux). The daemon receives pre-bound sockets from
+        // the OS, so it runs as the current user — no sudo needed for
+        // privileged ports.
+        // install_daemon returns Err when DEVPROXY_NO_SOCKET_ACTIVATION is
+        // set, triggering the fallback path.
+        let mut activated = false;
 
-        // Forward DEVPROXY_CONFIG_DIR so the daemon uses the same config dir
-        if let Ok(dir) = std::env::var("DEVPROXY_CONFIG_DIR") {
-            cmd.env("DEVPROXY_CONFIG_DIR", dir);
-        }
-
-        // Use pre_exec to call setsid() so the daemon runs in its own
-        // session and is fully detached from the parent process.
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-
-        // Capture daemon stderr to a log file for debugging startup failures.
-        // Append mode preserves the previous daemon's log for post-mortem debugging.
-        let daemon_log_path = Config::daemon_log_path()?;
-        let daemon_log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&daemon_log_path)
-            .with_context(|| {
-                format!("could not open daemon log at {}", daemon_log_path.display())
-            })?;
-
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::from(daemon_log_file));
-
-        let mut child = cmd.spawn().context("could not spawn daemon")?;
-        let pid = child.id();
-        // Spawn a thread to reap the child so it does not become a zombie.
-        // After setsid(), the child won't receive signals when the parent exits.
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-
-        // Wait for daemon to become responsive (or fail fast)
-        match wait_for_daemon(Duration::from_secs(5)) {
+        // Pass DEVPROXY_CONFIG_DIR if set — the plist/unit file must
+        // embed it so the daemon uses the correct config directory.
+        let config_dir_override = std::env::var("DEVPROXY_CONFIG_DIR").ok();
+        match crate::platform::install_daemon(&exe, port, config_dir_override.as_deref()) {
             Ok(()) => {
-                eprintln!("{} daemon started (pid: {pid})", "ok:".green());
-            }
-            Err(e) => {
-                eprintln!("{} daemon failed to start: {e}", "error:".red());
-                // Show last few lines of daemon log to help diagnose startup failures
-                if let Ok(log_contents) = std::fs::read_to_string(&daemon_log_path) {
-                    let last_lines: Vec<&str> = log_contents.lines().rev().take(10).collect();
-                    if !last_lines.is_empty() {
-                        eprintln!(
-                            "  {} daemon log ({}):",
-                            "log:".cyan(),
-                            daemon_log_path.display()
-                        );
-                        for line in last_lines.into_iter().rev() {
-                            eprintln!("    {line}");
+                // Wait for daemon to become responsive (socket activation
+                // startup may be slower than direct spawn)
+                match wait_for_daemon(Duration::from_secs(10)) {
+                    Ok(()) => {
+                        eprintln!("{} daemon started via socket activation", "ok:".green());
+                        activated = true;
+                    }
+                    Err(e) => {
+                        eprintln!("{} daemon failed to start: {e}", "error:".red());
+                        #[cfg(target_os = "macos")]
+                        {
+                            eprintln!(
+                                "  {} check: launchctl print gui/$(id -u)/{}",
+                                "hint:".yellow(),
+                                crate::platform::LAUNCHD_LABEL
+                            );
+                            if let Ok(log_path) = Config::daemon_log_path() {
+                                eprintln!("  {} log: {}", "hint:".yellow(), log_path.display());
+                            }
                         }
+                        #[cfg(target_os = "linux")]
+                        {
+                            eprintln!(
+                                "  {} check: systemctl --user status devproxy.socket",
+                                "hint:".yellow()
+                            );
+                            eprintln!(
+                                "  {} check: journalctl --user -u devproxy -n 20",
+                                "hint:".yellow()
+                            );
+                        }
+                        bail!("daemon failed to start. See hints above.");
                     }
                 }
-                if port < 1024 {
-                    eprintln!(
-                        "  {} port {port} requires root. Try: sudo devproxy init --domain {domain}",
-                        "hint:".yellow()
-                    );
-                }
-                bail!("daemon failed to start. See error above.");
             }
+            Err(e) => {
+                // Log only if not the expected DEVPROXY_NO_SOCKET_ACTIVATION bail
+                if !crate::platform::is_socket_activation_disabled() {
+                    eprintln!("{} socket activation setup failed: {e}", "warn:".yellow());
+                    eprintln!("{} falling back to direct daemon spawn...", "info:".cyan());
+                }
+            }
+        }
+
+        if !activated {
+            spawn_daemon_directly(&exe, port, domain)?;
         }
     }
 
