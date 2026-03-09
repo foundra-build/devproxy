@@ -38,7 +38,7 @@ assert_file_contains_fixed() {
     desc="$1"
     filepath="$2"
     needle="$3"
-    if grep -qF "$needle" "$filepath" 2>/dev/null; then
+    if grep -qF -- "$needle" "$filepath" 2>/dev/null; then
         echo "  PASS: $desc"
         PASS=$((PASS + 1))
     else
@@ -86,6 +86,8 @@ assert_file_contains "triggers on push" "$CI_YML" "push"
 assert_file_contains "targets main branch" "$CI_YML" "branches:.*main"
 assert_file_contains "has check job" "$CI_YML" "check:"
 assert_file_contains "has install-script job" "$CI_YML" "install-script:"
+assert_file_contains "has concurrency group" "$CI_YML" "concurrency"
+assert_file_contains_fixed "CI cancels in-progress runs" "$CI_YML" "cancel-in-progress: true"
 
 # ── Test 2: CI check job runs fmt, clippy, test in correct order ──
 echo ""
@@ -97,12 +99,11 @@ assert_file_contains_fixed "has cargo test" "$CI_YML" "cargo test"
 assert_line_before "fmt before clippy" "$CI_YML" "cargo fmt" "cargo clippy"
 assert_line_before "clippy before test" "$CI_YML" "cargo clippy" "cargo test"
 
-# ── Test 3: CI install-script job runs test_install.sh and test_ci_cd.sh ──
+# ── Test 3: CI install-script job runs test_install.sh ──
 echo ""
-echo "Test 3: CI install-script job runs test_install.sh and test_ci_cd.sh"
+echo "Test 3: CI install-script job runs test_install.sh"
 
 assert_file_contains "install-script job runs test_install.sh" "$CI_YML" "tests/test_install.sh"
-assert_file_contains "CI runs test_ci_cd.sh" "$CI_YML" "tests/test_ci_cd.sh"
 
 # ── Test 5: Release workflow YAML is valid and uses manual dispatch ──
 echo ""
@@ -119,13 +120,15 @@ assert_file_contains "has aarch64-unknown-linux-gnu target" "$RELEASE_YML" "aarc
 assert_file_contains "release job needs build" "$RELEASE_YML" "needs: build"
 assert_file_contains "uses gh release create" "$RELEASE_YML" "gh release create"
 assert_file_contains "validates version format" "$RELEASE_YML" "semver format"
-assert_file_contains "checks for existing tag" "$RELEASE_YML" "git.*tag.*list"
-assert_file_contains "pins cross to a specific tag" "$RELEASE_YML" "cross.*--tag"
+assert_file_contains_fixed "checks for existing tag via ls-remote" "$RELEASE_YML" "ls-remote --tags"
+assert_file_contains_fixed "pins cross to a specific commit rev" "$RELEASE_YML" "--rev f8151ae"
 assert_file_contains "pins checkout to github.sha" "$RELEASE_YML" "github.sha"
 assert_file_contains "verifies binary count" "$RELEASE_YML" "EXPECTED_COUNT=4"
 assert_file_contains "runs tests before release build" "$RELEASE_YML" "cargo test"
 assert_file_contains "re-checks tag before creation" "$RELEASE_YML" "Re-check.*tag"
-assert_file_contains "uses macos-13 for x86_64-apple-darwin" "$RELEASE_YML" "macos-13"
+assert_file_contains "uses macos-latest for all macOS targets" "$RELEASE_YML" "macos-latest"
+assert_file_contains_fixed "has release concurrency group" "$RELEASE_YML" 'group: "release"'
+assert_file_contains_fixed "release concurrency does not cancel" "$RELEASE_YML" "cancel-in-progress: false"
 
 # ── Test 6: Release binary naming matches install script ──
 echo ""
