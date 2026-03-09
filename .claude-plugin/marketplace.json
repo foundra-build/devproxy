@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "devproxy",
-      "source": ".",
+      "source": "./",
       "description": "Skills for setting up and using devproxy — local HTTPS dev subdomains for Docker Compose projects",
       "version": "0.3.0",
       "author": {
