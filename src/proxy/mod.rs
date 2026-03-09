@@ -1,6 +1,7 @@
 pub mod cert;
 pub mod docker;
 pub mod router;
+pub mod socket_activation;
 
 use crate::config::Config;
 use crate::ipc::{Request, Response};
@@ -100,11 +101,24 @@ pub async fn run_daemon(port: u16) -> Result<()> {
     };
     eprintln!("IPC listening on {}", socket_path.display());
 
-    // Set up HTTPS listener
-    let tcp_listener = TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .with_context(|| format!("could not bind to port {port}"))?;
-    eprintln!("HTTPS proxy listening on 127.0.0.1:{port}");
+    // Set up HTTPS listener: prefer socket activation (launchd/systemd),
+    // fall back to direct bind for tests and manual runs.
+    let tcp_listener = match socket_activation::acquire_listener().await? {
+        Some(listener) => {
+            let addr = listener
+                .local_addr()
+                .context("could not determine activated socket address")?;
+            eprintln!("HTTPS proxy listening on {addr} (socket activation)");
+            listener
+        }
+        None => {
+            let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+                .await
+                .with_context(|| format!("could not bind to port {port}"))?;
+            eprintln!("HTTPS proxy listening on 127.0.0.1:{port}");
+            listener
+        }
+    };
 
     // Run all three tasks concurrently with try_join!.
     // All three loops run forever under normal operation. If any returns

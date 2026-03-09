@@ -91,7 +91,10 @@ fn check_write_permission(exe_path: &Path) -> Result<()> {
     // or its parent directory (for rename).
     let writable = if exe_path.exists() {
         // Try opening the file for writing as a permission check
-        std::fs::OpenOptions::new().write(true).open(exe_path).is_ok()
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(exe_path)
+            .is_ok()
     } else if let Some(parent) = exe_path.parent() {
         // Check parent directory is writable
         let test_path = parent.join(".devproxy-update-check");
@@ -238,10 +241,7 @@ fn run_blocking() -> Result<()> {
 
     // Compare versions using semver
     if !is_newer_version(current_version, &remote_version) {
-        eprintln!(
-            "{} already up to date (v{current_version})",
-            "ok:".green()
-        );
+        eprintln!("{} already up to date (v{current_version})", "ok:".green());
         return Ok(());
     }
 
@@ -268,15 +268,31 @@ fn run_blocking() -> Result<()> {
         return result;
     }
 
-    eprintln!(
-        "{} updated to v{remote_version}",
-        "ok:".green()
-    );
-    eprintln!(
-        "{} run {} to restart the daemon",
-        "info:".cyan(),
-        "devproxy init".bold()
-    );
+    eprintln!("{} updated to v{remote_version}", "ok:".green());
+
+    // Restart the platform-managed daemon with the new binary.
+    // kickstart -k / systemctl restart atomically kills the old process
+    // and starts a new one — no bootout/bootstrap dance needed.
+    match crate::platform::restart_daemon() {
+        Ok(true) => {
+            eprintln!("{} daemon restarted with new version", "ok:".green());
+        }
+        Ok(false) => {
+            // No platform-managed daemon found — tell user to restart manually
+            eprintln!(
+                "{} run {} to restart the daemon with the new version",
+                "info:".cyan(),
+                "devproxy init".bold()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "{} could not restart daemon: {e}. Run {} to restart manually",
+                "warn:".yellow(),
+                "devproxy init".bold()
+            );
+        }
+    }
 
     Ok(())
 }
@@ -286,20 +302,47 @@ fn do_update(download_url: &str, exe_path: &Path, tmpfile: &Path) -> Result<()> 
     validate_binary_magic(tmpfile)?;
     prepare_binary(tmpfile)?;
 
-    // Stop daemon after download succeeds but before binary replacement,
-    // so a download failure is a no-op (daemon stays running), and the
-    // binary replacement happens with no running daemon for a clean transition.
-    let socket_path = crate::config::Config::socket_path()?;
-    if socket_path.exists()
-        && crate::ipc::ping_sync(&socket_path, std::time::Duration::from_secs(2))
-    {
-        eprintln!("{} stopping daemon for update...", "info:".cyan());
-        super::init::kill_stale_daemon()?;
+    // For non-platform-managed daemons, stop before replacing the binary
+    // (the existing kill-before-replace approach). For platform-managed
+    // daemons, we skip this — kickstart -k / systemctl restart will handle
+    // the stop+start atomically after replacement.
+    let is_platform_managed =
+        !crate::platform::is_socket_activation_disabled() && is_daemon_platform_managed();
+
+    if !is_platform_managed {
+        let socket_path = crate::config::Config::socket_path()?;
+        if socket_path.exists()
+            && crate::ipc::ping_sync(&socket_path, std::time::Duration::from_secs(2))
+        {
+            eprintln!("{} stopping daemon for update...", "info:".cyan());
+            super::init::kill_stale_daemon()?;
+        }
     }
 
     replace_binary(tmpfile, exe_path)?;
 
     Ok(())
+}
+
+/// Check if the daemon is managed by a platform service manager
+/// (launchd plist exists on macOS, systemd unit exists on Linux).
+fn is_daemon_platform_managed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::platform::launchagent_plist_path()
+            .map(|p| p.exists())
+            .unwrap_or(false)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::platform::systemd_user_dir()
+            .map(|d| d.join("devproxy.socket").exists())
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        false
+    }
 }
 
 #[cfg(test)]
