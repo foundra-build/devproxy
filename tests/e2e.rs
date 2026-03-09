@@ -45,6 +45,7 @@ fn find_free_port() -> u16 {
 
 /// Copy the fixtures directory into an isolated temp dir for one test.
 /// Returns the path to the copy (which contains docker-compose.yml, Dockerfile, etc).
+/// Initializes a git repo with a known remote so detect_app_name is predictable.
 fn copy_fixtures(test_name: &str) -> PathBuf {
     let dest = std::env::temp_dir().join(format!(
         "devproxy-fixtures-{test_name}-{}",
@@ -61,8 +62,28 @@ fn copy_fixtures(test_name: &str) -> PathBuf {
         let dest_path = dest.join(entry.file_name());
         std::fs::copy(entry.path(), &dest_path).unwrap();
     }
+
+    // Initialize a git repo with a known remote so detect_app_name is predictable
+    Command::new("git")
+        .args(["init"])
+        .current_dir(&dest)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("git init failed");
+    Command::new("git")
+        .args(["remote", "add", "origin", "https://github.com/test/e2e-fixture.git"])
+        .current_dir(&dest)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("git remote add failed");
+
     dest
 }
+
+/// The expected app name suffix for fixture directories (derived from git remote)
+const FIXTURE_APP_NAME: &str = "e2e-fixture";
 
 /// Create an isolated test config directory and generate certs using `init --no-daemon`.
 /// Returns the path to the config directory (to be set as DEVPROXY_CONFIG_DIR).
@@ -473,6 +494,12 @@ fn test_full_e2e_workflow() {
         .and_then(|l| l.split("https://").nth(1).and_then(|s| s.split('.').next()))
         .expect("should find slug in up output");
 
+    // Verify the slug contains the app name suffix
+    assert!(
+        slug.ends_with(&format!("-{FIXTURE_APP_NAME}")),
+        "slug should end with app name '-{FIXTURE_APP_NAME}': {slug}"
+    );
+
     // Verify .devproxy-project was written with the correct slug
     let project_file = fixtures.join(".devproxy-project");
     assert!(
@@ -506,9 +533,10 @@ fn test_full_e2e_workflow() {
         "daemon should be running: {status_stderr}"
     );
 
-    // Ls check
+    // Ls check (run from fixtures dir to get * indicator)
     let ls_output = Command::new(devproxy_bin())
         .args(["ls"])
+        .current_dir(&fixtures)
         .env("DEVPROXY_CONFIG_DIR", &config_dir)
         .output()
         .expect("failed to run devproxy ls");
@@ -516,6 +544,10 @@ fn test_full_e2e_workflow() {
     assert!(
         ls_stdout.contains(slug),
         "ls should show our slug '{slug}': {ls_stdout}"
+    );
+    assert!(
+        ls_stdout.contains("*"),
+        "ls should show * for current project: {ls_stdout}"
     );
 
     // Curl through the proxy (--resolve bypasses DNS, --cacert trusts our test CA)

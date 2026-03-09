@@ -225,6 +225,77 @@ pub fn read_project_file(dir: &Path) -> Result<String> {
     Ok(content.trim().to_string())
 }
 
+/// Detect the app name for the given directory.
+/// Tries git remote origin first (extracts repo name from URL),
+/// falls back to directory name. Result is sanitized for use in a subdomain label.
+pub fn detect_app_name(dir: &Path) -> Result<String> {
+    // Try git remote
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["-C", &dir.to_string_lossy(), "remote", "get-url", "origin"])
+        .output()
+        && output.status.success()
+    {
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if let Some(name) = extract_repo_name(&url) {
+            return Ok(sanitize_subdomain(&name));
+        }
+    }
+
+    // Fall back to directory name
+    let dir_name = dir
+        .file_name()
+        .context("directory has no name")?
+        .to_string_lossy()
+        .to_string();
+    Ok(sanitize_subdomain(&dir_name))
+}
+
+/// Extract the repository name from a git remote URL.
+/// Handles HTTPS (https://github.com/user/repo.git) and SSH (git@github.com:user/repo.git).
+fn extract_repo_name(url: &str) -> Option<String> {
+    let path_part = if url.contains("://") {
+        url.split('/').next_back()?
+    } else if let Some(after_colon) = url.split(':').nth(1) {
+        after_colon.split('/').next_back()?
+    } else {
+        return None;
+    };
+    let name = path_part.strip_suffix(".git").unwrap_or(path_part);
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Sanitize a string for use as part of a DNS subdomain label:
+/// lowercase, replace non-alphanumeric with hyphens, collapse consecutive hyphens,
+/// trim leading/trailing hyphens. Does NOT truncate — callers that need length
+/// enforcement should use `compose_slug` which truncates the composite result.
+fn sanitize_subdomain(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let replaced: String = lower
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    replaced
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Compose a DNS-safe slug from a random slug and app name.
+/// Joins as `{random_slug}-{app_name}` and truncates the result to 63 characters
+/// (the RFC 1035 DNS label limit), trimming any trailing hyphen.
+pub fn compose_slug(random_slug: &str, app_name: &str) -> String {
+    let composite = format!("{random_slug}-{app_name}");
+    if composite.len() <= 63 {
+        return composite;
+    }
+    composite[..63].trim_end_matches('-').to_string()
+}
+
 /// Find a free ephemeral port
 pub fn find_free_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -379,5 +450,118 @@ services:
                 .to_string()
                 .contains("no docker-compose.yml")
         );
+    }
+
+    #[test]
+    fn detect_app_name_from_git_remote_https() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", "https://github.com/user/my-cool-app.git"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let name = detect_app_name(dir.path()).unwrap();
+        assert_eq!(name, "my-cool-app");
+    }
+
+    #[test]
+    fn detect_app_name_from_git_remote_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", "git@github.com:user/another-app.git"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let name = detect_app_name(dir.path()).unwrap();
+        assert_eq!(name, "another-app");
+    }
+
+    #[test]
+    fn detect_app_name_falls_back_to_dir_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("my-project");
+        std::fs::create_dir_all(&sub).unwrap();
+        let name = detect_app_name(&sub).unwrap();
+        assert_eq!(name, "my-project");
+    }
+
+    #[test]
+    fn detect_app_name_sanitizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("My Cool App!!!");
+        std::fs::create_dir_all(&sub).unwrap();
+        let name = detect_app_name(&sub).unwrap();
+        assert_eq!(name, "my-cool-app");
+    }
+
+    #[test]
+    fn extract_repo_name_https() {
+        assert_eq!(
+            extract_repo_name("https://github.com/user/repo.git"),
+            Some("repo".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_repo_name_ssh() {
+        assert_eq!(
+            extract_repo_name("git@github.com:user/repo.git"),
+            Some("repo".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_repo_name_no_git_suffix() {
+        assert_eq!(
+            extract_repo_name("https://github.com/user/repo"),
+            Some("repo".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_subdomain_basic() {
+        assert_eq!(sanitize_subdomain("My Cool App!!!"), "my-cool-app");
+    }
+
+    #[test]
+    fn sanitize_subdomain_already_clean() {
+        assert_eq!(sanitize_subdomain("my-app"), "my-app");
+    }
+
+    #[test]
+    fn sanitize_subdomain_does_not_truncate() {
+        let long_name = "a".repeat(100);
+        let result = sanitize_subdomain(&long_name);
+        assert_eq!(result.len(), 100, "sanitize_subdomain should not truncate");
+    }
+
+    #[test]
+    fn compose_slug_basic() {
+        assert_eq!(compose_slug("swift-penguin", "devproxy"), "swift-penguin-devproxy");
+    }
+
+    #[test]
+    fn compose_slug_truncates_to_63_chars() {
+        let long_app = "a".repeat(100);
+        let result = compose_slug("swift-penguin", &long_app);
+        assert!(result.len() <= 63, "composite slug must fit in a DNS label: len={}", result.len());
+        assert!(!result.ends_with('-'), "should not end with hyphen after truncation");
+        assert!(result.starts_with("swift-penguin-"), "should preserve the random slug prefix");
+    }
+
+    #[test]
+    fn compose_slug_normal_lengths_not_truncated() {
+        let result = compose_slug("bold-fox", "my-cool-app");
+        assert_eq!(result, "bold-fox-my-cool-app");
     }
 }

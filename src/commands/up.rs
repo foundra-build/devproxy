@@ -28,8 +28,12 @@ pub fn run() -> Result<()> {
         container_port.to_string().cyan()
     );
 
-    // Generate slug
-    let slug = slugs::generate_slug();
+    // Detect app name and generate composite slug
+    let app_name = config::detect_app_name(&cwd)?;
+    eprintln!("app: {}", app_name.cyan());
+
+    let random_slug = slugs::generate_slug();
+    let slug = config::compose_slug(&random_slug, &app_name);
     eprintln!("slug: {}", slug.cyan());
 
     // Find free port
