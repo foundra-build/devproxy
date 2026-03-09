@@ -88,15 +88,21 @@ pub fn kill_stale_daemon() -> Result<()> {
     // stop_daemon() respects DEVPROXY_NO_SOCKET_ACTIVATION and checks for
     // plist/unit file existence, so it won't interfere with real installed
     // daemons when called from tests.
-    if let Err(e) = crate::platform::stop_daemon() {
-        // Not fatal — daemon may not be platform-managed
-        eprintln!(
-            "{} platform stop: {e} (falling back to signal)",
-            "info:".cyan()
-        );
-    } else {
-        // Give the platform manager a moment to stop the daemon
-        std::thread::sleep(Duration::from_millis(500));
+    match crate::platform::stop_daemon() {
+        Ok(true) => {
+            // Platform manager stopped the daemon — give it a moment to clean up
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        Ok(false) => {
+            // No platform-managed daemon was running — no delay needed
+        }
+        Err(e) => {
+            // Not fatal — daemon may not be platform-managed
+            eprintln!(
+                "{} platform stop: {e} (falling back to signal)",
+                "info:".cyan()
+            );
+        }
     }
 
     let pid_path = Config::pid_path()?;

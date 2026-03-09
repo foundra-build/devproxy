@@ -26,7 +26,6 @@ mkdir -p "$DEVPROXY_CONFIG_DIR"
 devproxy init --domain test.dev --no-daemon 2>&1 || true
 
 # Install daemon via init (should use systemd path)
-devproxy init --domain test.dev --port 8443 2>&1
 INIT_OUTPUT=$(devproxy init --domain test.dev --port 8443 2>&1 || true)
 echo "$INIT_OUTPUT"
 

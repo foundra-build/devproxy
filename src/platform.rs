@@ -52,6 +52,22 @@ pub fn generate_launchagent_plist(
         None => String::new(),
     };
 
+    // Use the same log path as Config::daemon_log_path() — inside the config dir.
+    // When config_dir is overridden, log goes there; otherwise use the default.
+    let log_path = match config_dir {
+        Some(dir) => format!("{dir}/daemon.log"),
+        None => {
+            // Match the default from Config::config_dir() -> ~/.config/devproxy/
+            dirs::home_dir()
+                .map(|h| {
+                    h.join(".config/devproxy/daemon.log")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .unwrap_or_else(|| "/tmp/devproxy-daemon.log".to_string())
+        }
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -83,7 +99,7 @@ pub fn generate_launchagent_plist(
     <key>RunAtLoad</key>
     <true/>
     <key>StandardErrorPath</key>
-    <string>/tmp/devproxy-daemon.log</string>
+    <string>{log_path}</string>
     <key>StandardOutPath</key>
     <string>/dev/null</string>
 </dict>
@@ -97,14 +113,15 @@ pub fn generate_launchagent_plist(
 #[allow(dead_code)]
 pub fn generate_systemd_socket_unit(port: u16) -> String {
     format!(
-        "[Unit]\n\
-         Description=devproxy HTTPS socket\n\
-         \n\
-         [Socket]\n\
-         ListenStream=127.0.0.1:{port}\n\
-         \n\
-         [Install]\n\
-         WantedBy=sockets.target\n"
+        r#"[Unit]
+Description=devproxy HTTPS socket
+
+[Socket]
+ListenStream=127.0.0.1:{port}
+
+[Install]
+WantedBy=sockets.target
+"#
     )
 }
 
@@ -119,24 +136,25 @@ pub fn generate_systemd_service_unit(
     config_dir: Option<&str>,
 ) -> String {
     let env_line = match config_dir {
-        Some(dir) => format!("Environment=DEVPROXY_CONFIG_DIR={dir}\n         "),
+        Some(dir) => format!("Environment=DEVPROXY_CONFIG_DIR={dir}\n"),
         None => String::new(),
     };
 
     format!(
-        "[Unit]\n\
-         Description=devproxy HTTPS reverse proxy daemon\n\
-         Requires={SYSTEMD_UNIT_NAME}.socket\n\
-         After={SYSTEMD_UNIT_NAME}.socket\n\
-         \n\
-         [Service]\n\
-         Type=simple\n\
-         {env_line}ExecStart={binary_path} daemon --port {port}\n\
-         Restart=on-failure\n\
-         RestartSec=5\n\
-         \n\
-         [Install]\n\
-         WantedBy=default.target\n"
+        r#"[Unit]
+Description=devproxy HTTPS reverse proxy daemon
+Requires={SYSTEMD_UNIT_NAME}.socket
+After={SYSTEMD_UNIT_NAME}.socket
+
+[Service]
+Type=simple
+{env_line}ExecStart={binary_path} daemon --port {port}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"#
     )
 }
 
@@ -170,9 +188,14 @@ pub fn systemd_user_dir() -> Result<PathBuf> {
 ///
 /// macOS: `launchctl bootout` (stops the process; plist remains on disk).
 /// Linux: `systemctl --user stop` the socket and service.
-pub fn stop_daemon() -> Result<()> {
+///
+/// Returns `Ok(true)` if a platform-managed daemon was actually stopped,
+/// `Ok(false)` if there was nothing to stop (no plist/unit files, or
+/// socket activation disabled). Callers can use this to skip unnecessary
+/// post-stop delays.
+pub fn stop_daemon() -> Result<bool> {
     if is_socket_activation_disabled() {
-        return Ok(());
+        return Ok(false);
     }
 
     #[cfg(target_os = "macos")]
@@ -181,6 +204,7 @@ pub fn stop_daemon() -> Result<()> {
         let plist_path = launchagent_plist_path()?;
         if plist_path.exists() {
             bootout_launchagent()?;
+            return Ok(true);
         }
     }
     #[cfg(target_os = "linux")]
@@ -192,6 +216,7 @@ pub fn stop_daemon() -> Result<()> {
             .exists()
         {
             stop_systemd_units()?;
+            return Ok(true);
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -199,7 +224,7 @@ pub fn stop_daemon() -> Result<()> {
         // No-op on unsupported platforms (don't bail — caller handles fallback)
     }
 
-    Ok(())
+    Ok(false)
 }
 
 // ---- Restart (stop + start without re-installing) --------------------------
@@ -297,32 +322,6 @@ pub fn install_daemon(binary_path: &Path, port: u16, config_dir: Option<&str>) -
     Ok(())
 }
 
-/// Uninstall: stop AND remove plist/unit files.
-/// Used by `devproxy init` before re-installing.
-///
-/// Respects `DEVPROXY_NO_SOCKET_ACTIVATION` for test isolation.
-#[allow(dead_code)]
-pub fn uninstall_daemon() -> Result<()> {
-    if is_socket_activation_disabled() {
-        return Ok(());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        uninstall_launchagent()?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        uninstall_systemd_units()?;
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        // No-op on unsupported platforms
-    }
-
-    Ok(())
-}
-
 // ---- macOS launchd ---------------------------------------------------------
 
 #[cfg(target_os = "macos")]
@@ -383,22 +382,6 @@ fn install_launchagent(binary_path: &str, port: u16, config_dir: Option<&str>) -
     }
 
     eprintln!("{} LaunchAgent installed and started", "ok:".green());
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-fn uninstall_launchagent() -> Result<()> {
-    use colored::Colorize;
-
-    let plist_path = launchagent_plist_path()?;
-    if plist_path.exists() {
-        let _ = bootout_launchagent();
-        std::fs::remove_file(&plist_path)
-            .with_context(|| format!("could not remove {}", plist_path.display()))?;
-        eprintln!("{} removed {}", "ok:".green(), plist_path.display());
-    }
-
     Ok(())
 }
 
@@ -533,50 +516,6 @@ fn stop_systemd_units() -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn uninstall_systemd_units() -> Result<()> {
-    use colored::Colorize;
-
-    let unit_dir = systemd_user_dir()?;
-    let socket_file = unit_dir.join(format!("{SYSTEMD_UNIT_NAME}.socket"));
-
-    // Only act if unit files exist
-    if !socket_file.exists() {
-        return Ok(());
-    }
-
-    let _ = std::process::Command::new("systemctl")
-        .args([
-            "--user",
-            "disable",
-            "--now",
-            &format!("{SYSTEMD_UNIT_NAME}.socket"),
-        ])
-        .status();
-
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "stop", &format!("{SYSTEMD_UNIT_NAME}.service")])
-        .status();
-
-    for name in [
-        format!("{SYSTEMD_UNIT_NAME}.socket"),
-        format!("{SYSTEMD_UNIT_NAME}.service"),
-    ] {
-        let path = unit_dir.join(&name);
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("could not remove {}", path.display()))?;
-            eprintln!("{} removed {}", "ok:".green(), path.display());
-        }
-    }
-
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status();
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,6 +539,14 @@ mod tests {
             !plist.contains("EnvironmentVariables"),
             "should not have env vars when config_dir is None"
         );
+        assert!(
+            plist.contains("daemon.log"),
+            "should have a log path in StandardErrorPath"
+        );
+        assert!(
+            !plist.contains("/tmp/devproxy-daemon.log"),
+            "should not use hardcoded /tmp log path"
+        );
     }
 
     #[test]
@@ -617,6 +564,10 @@ mod tests {
         assert!(
             plist.contains("/tmp/test-config"),
             "should have config dir value"
+        );
+        assert!(
+            plist.contains("/tmp/test-config/daemon.log"),
+            "should use config-dir-based log path"
         );
     }
 
