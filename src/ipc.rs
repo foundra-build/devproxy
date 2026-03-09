@@ -164,7 +164,7 @@ mod tests {
         let sock_path = dir.path().join("test.sock");
 
         // Create a listener but never accept connections -- simulates
-        // a dead daemon with a stale socket.
+        // a hung daemon that is listening but not processing requests.
         let _listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
 
         let start = std::time::Instant::now();

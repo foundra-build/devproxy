@@ -953,14 +953,20 @@ fn test_reinit_kills_stale_daemon() {
     let new_pid: u32 = new_pid_str.trim().parse().unwrap();
     assert_ne!(new_pid, pid1, "new daemon should have a different PID");
 
-    // Clean up the new daemon
-    let kill_ret = unsafe { libc::kill(new_pid as i32, libc::SIGTERM) };
-    if kill_ret != 0 {
-        eprintln!(
-            "warning: failed to kill new daemon (pid {new_pid}): {}",
-            std::io::Error::last_os_error()
-        );
-    }
+    // Clean up the new daemon: send SIGTERM, wait for it to exit, then
+    // fall back to SIGKILL if it doesn't die within 1 second.
+    unsafe { libc::kill(new_pid as i32, libc::SIGTERM) };
     std::thread::sleep(Duration::from_millis(500));
+    if unsafe { libc::kill(new_pid as i32, 0) } == 0 {
+        // Still alive -- force kill
+        unsafe { libc::kill(new_pid as i32, libc::SIGKILL) };
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Verify the new daemon is actually dead before cleaning up
+    assert_ne!(
+        unsafe { libc::kill(new_pid as i32, 0) },
+        0,
+        "new daemon (pid {new_pid}) should be dead after cleanup"
+    );
     let _ = std::fs::remove_dir_all(&config_dir);
 }

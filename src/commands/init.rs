@@ -91,9 +91,11 @@ fn kill_stale_daemon() -> Result<()> {
 
     if pid_path.exists() {
         let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            // PID must be positive. PID 0 would signal the entire process group,
-            // and negative PIDs signal process groups by absolute value.
+        if let Ok(pid_u32) = pid_str.trim().parse::<u32>() {
+            // PID 0 is not valid -- it would signal the entire process group
+            // via libc::kill. The daemon writes its PID as u32 (from
+            // std::process::id()), so 0 is the only non-positive case.
+            let pid = pid_u32 as i32;
             if pid <= 0 {
                 eprintln!(
                     "{} invalid PID {pid} in PID file, cleaning up stale files",
@@ -164,6 +166,9 @@ fn kill_stale_daemon() -> Result<()> {
                             "{} could not confirm daemon (pid: {pid}) was killed",
                             "warn:".yellow()
                         );
+                        // Don't remove PID file -- the process may still be alive.
+                        // Leave it for manual cleanup.
+                        return Ok(());
                     }
                 }
             } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
@@ -333,9 +338,14 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
             });
         }
 
+        // Capture daemon stderr to a log file for debugging startup failures.
+        let daemon_log_path = Config::daemon_log_path()?;
+        let daemon_log_file = std::fs::File::create(&daemon_log_path)
+            .with_context(|| format!("could not create daemon log at {}", daemon_log_path.display()))?;
+
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::from(daemon_log_file));
 
         let mut child = cmd.spawn().context("could not spawn daemon")?;
         let pid = child.id();
@@ -353,6 +363,16 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
                     "{} daemon failed to start: {e}",
                     "error:".red()
                 );
+                // Show last few lines of daemon log to help diagnose startup failures
+                if let Ok(log_contents) = std::fs::read_to_string(&daemon_log_path) {
+                    let last_lines: Vec<&str> = log_contents.lines().rev().take(10).collect();
+                    if !last_lines.is_empty() {
+                        eprintln!("  {} daemon log ({}):", "log:".cyan(), daemon_log_path.display());
+                        for line in last_lines.into_iter().rev() {
+                            eprintln!("    {line}");
+                        }
+                    }
+                }
                 if port < 1024 {
                     eprintln!(
                         "  {} port {port} requires root. Try: sudo devproxy init --domain {domain}",

@@ -53,6 +53,10 @@ impl Config {
         Ok(Self::config_dir()?.join("daemon.pid"))
     }
 
+    pub fn daemon_log_path() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("daemon.log"))
+    }
+
     pub fn save(&self) -> Result<()> {
         let dir = Self::config_dir()?;
         std::fs::create_dir_all(&dir)?;
