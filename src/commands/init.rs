@@ -76,12 +76,26 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
             cmd.env("DEVPROXY_CONFIG_DIR", dir);
         }
 
+        // Use pre_exec to call setsid() so the daemon runs in its own
+        // session and is fully detached from the parent process.
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
 
-        let child = cmd.spawn().context("could not spawn daemon")?;
-        eprintln!("{} daemon started (pid: {})", "ok:".green(), child.id());
+        let mut child = cmd.spawn().context("could not spawn daemon")?;
+        let pid = child.id();
+        // Spawn a thread to reap the child so it does not become a zombie.
+        // After setsid(), the child won't receive signals when the parent exits.
+        std::thread::spawn(move || { let _ = child.wait(); });
+        eprintln!("{} daemon started (pid: {})", "ok:".green(), pid);
     }
 
     eprintln!();

@@ -18,7 +18,7 @@ pub enum Commands {
         #[arg(long, default_value = "443")]
         port: u16,
         /// Skip starting the daemon (useful for CI or testing)
-        #[arg(long, default_value = "false")]
+        #[arg(long)]
         no_daemon: bool,
     },
     /// Start this project and assign a dev subdomain

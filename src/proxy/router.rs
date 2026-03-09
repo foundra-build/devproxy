@@ -7,6 +7,13 @@ pub struct Route {
     pub host_port: u16,
 }
 
+/// Thread-safe route table mapping hostnames to upstream ports.
+///
+/// Lock methods use `expect("lock poisoned")` deliberately: a poisoned lock
+/// means a thread panicked while holding it, leaving the route table in an
+/// unknown state. In a single-binary daemon there is no meaningful recovery
+/// from this, so panicking to crash the daemon (which will be restarted) is
+/// the correct behavior.
 #[derive(Debug, Clone)]
 pub struct Router {
     routes: Arc<RwLock<HashMap<String, Route>>>,

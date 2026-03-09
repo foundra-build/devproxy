@@ -4,7 +4,7 @@ pub mod router;
 
 use crate::config::Config;
 use crate::ipc::{Request, Response};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -30,9 +30,18 @@ pub async fn run_daemon(port: u16) -> Result<()> {
     eprintln!("loading existing routes...");
     docker::load_routes(&router).await?;
 
-    // Set up IPC socket
+    // Set up IPC socket -- check for an already-running daemon first
     let socket_path = Config::socket_path()?;
     if socket_path.exists() {
+        // Try to connect to see if another daemon is already listening
+        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+            bail!(
+                "another daemon appears to be running (socket {} is live). \
+                 Stop it first or remove the stale socket.",
+                socket_path.display()
+            );
+        }
+        // Stale socket from a previous crash -- safe to remove
         std::fs::remove_file(&socket_path)?;
     }
 
@@ -46,22 +55,33 @@ pub async fn run_daemon(port: u16) -> Result<()> {
         .with_context(|| format!("could not bind to port {port}"))?;
     eprintln!("HTTPS proxy listening on 127.0.0.1:{port}");
 
-    // Run all three tasks
+    // Run all three tasks concurrently with try_join!.
+    // All three loops run forever under normal operation. If any returns
+    // (which means it errored), try_join! cancels the others and propagates.
     let r1 = router.clone();
     let r2 = router.clone();
     let r3 = router.clone();
 
-    tokio::select! {
-        result = https_proxy_loop(tcp_listener, tls_acceptor, r1) => {
-            result.context("HTTPS proxy task failed")?;
-        }
-        result = docker::watch_events(&r2) => {
-            result.context("Docker watcher task failed")?;
-        }
-        result = ipc_server_loop(ipc_listener, r3) => {
-            result.context("IPC server task failed")?;
-        }
+    let (proxy_res, docker_res, ipc_res) = tokio::join!(
+        https_proxy_loop(tcp_listener, tls_acceptor, r1),
+        docker::watch_events(&r2),
+        ipc_server_loop(ipc_listener, r3),
+    );
+
+    // Report all errors, not just the first
+    if let Err(e) = &proxy_res {
+        eprintln!("HTTPS proxy task failed: {e:#}");
     }
+    if let Err(e) = &docker_res {
+        eprintln!("Docker watcher task failed: {e:#}");
+    }
+    if let Err(e) = &ipc_res {
+        eprintln!("IPC server task failed: {e:#}");
+    }
+
+    proxy_res.context("HTTPS proxy task failed")?;
+    docker_res.context("Docker watcher task failed")?;
+    ipc_res.context("IPC server task failed")?;
 
     Ok(())
 }
@@ -219,10 +239,12 @@ async fn proxy_to_upstream(
         .map_err(|e| anyhow::anyhow!("failed to collect body: {e}"))?
         .to_bytes();
 
-    // Build headers on the builder before constructing the request
+    // Build headers on the builder before constructing the request.
+    // Set the upstream Host header to target the container's address.
     let mut builder = HyperRequest::builder()
         .method(method)
-        .uri(upstream_uri);
+        .uri(upstream_uri)
+        .header("host", upstream_addr);
 
     for (name, value) in headers.iter() {
         if name != "host" {

@@ -27,6 +27,7 @@ rustls-pemfile = "2"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 bytes = "1"
 time = "0.3"
+libc = "0.2"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }

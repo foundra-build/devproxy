@@ -1,5 +1,5 @@
 use crate::proxy::router::Router;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -111,14 +111,40 @@ pub async fn load_routes(router: &Router) -> Result<()> {
     Ok(())
 }
 
-/// Watch Docker events and update routes in real-time
+/// Maximum consecutive failures before giving up on Docker event watching.
+const MAX_CONSECUTIVE_FAILURES: u32 = 10;
+
+/// Watch Docker events and update routes in real-time.
+///
+/// Retries on transient errors (e.g., `docker events` process exits) with
+/// exponential backoff up to 30 seconds. Gives up after MAX_CONSECUTIVE_FAILURES
+/// consecutive failures. A successful event resets the failure counter.
 pub async fn watch_events(router: &Router) -> Result<()> {
+    let mut consecutive_failures: u32 = 0;
+
     loop {
         eprintln!("  starting docker event watcher...");
-        let result = watch_events_inner(router).await;
-        if let Err(e) = result {
-            eprintln!("  docker event watcher error: {e}, restarting in 2s...");
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        match watch_events_inner(router).await {
+            Ok(()) => {
+                // docker events exited cleanly (unlikely but possible)
+                consecutive_failures = 0;
+                eprintln!("  docker event watcher exited, restarting...");
+            }
+            Err(e) => {
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    bail!(
+                        "docker event watcher failed {MAX_CONSECUTIVE_FAILURES} \
+                         consecutive times, last error: {e:#}"
+                    );
+                }
+                let delay = std::cmp::min(2u64.pow(consecutive_failures), 30);
+                eprintln!(
+                    "  docker event watcher error ({consecutive_failures}/\
+                     {MAX_CONSECUTIVE_FAILURES}): {e:#}, retrying in {delay}s..."
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+            }
         }
     }
 }
@@ -136,6 +162,7 @@ async fn watch_events_inner(router: &Router) -> Result<()> {
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .context("failed to spawn docker events")?;
 
@@ -188,6 +215,9 @@ async fn watch_events_inner(router: &Router) -> Result<()> {
             }
         }
     }
+
+    // Ensure child process is cleaned up
+    let _ = child.wait().await;
 
     Ok(())
 }
