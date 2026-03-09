@@ -56,26 +56,34 @@ pub fn run() -> Result<()> {
         bail!("daemon is not running (no socket at {}). Run `devproxy init` first.", socket_path.display());
     }
 
-    // Set a connect timeout to avoid hanging on a stale socket where
-    // the daemon process is dead but the socket file still exists.
-    let connect_timeout = std::time::Duration::from_secs(2);
-    let connect_result = std::os::unix::net::UnixStream::connect(&socket_path)
-        .and_then(|stream| {
-            stream.set_read_timeout(Some(connect_timeout))?;
-            stream.set_write_timeout(Some(connect_timeout))?;
-            Ok(stream)
-        });
+    // Send an actual IPC ping with a timeout to verify the daemon is
+    // responsive, not just that a stale socket file exists.
+    {
+        use std::io::{BufRead, Write};
+        let ping_timeout = std::time::Duration::from_secs(2);
+        let daemon_alive = (|| -> bool {
+            let stream = match std::os::unix::net::UnixStream::connect(&socket_path) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            stream.set_read_timeout(Some(ping_timeout)).ok();
+            stream.set_write_timeout(Some(ping_timeout)).ok();
+            if stream.try_clone().ok().and_then(|mut w| {
+                w.write_all(b"{\"cmd\":\"ping\"}\n").ok()?;
+                w.shutdown(std::net::Shutdown::Write).ok()
+            }).is_none() {
+                return false;
+            }
+            let mut reader = std::io::BufReader::new(&stream);
+            let mut response = String::new();
+            reader.read_line(&mut response).is_ok() && response.contains("pong")
+        })();
 
-    match connect_result {
-        Ok(_stream) => {
-            // Connection succeeded -- daemon is alive
-            drop(_stream);
-        }
-        Err(_) => {
+        if !daemon_alive {
             let _ = std::fs::remove_file(&override_path);
             let _ = std::fs::remove_file(compose_dir.join(".devproxy-project"));
             bail!(
-                "daemon is not running (could not connect to {}). Run `devproxy init` first.",
+                "daemon is not running (no response from {}). Run `devproxy init` first.",
                 socket_path.display()
             );
         }

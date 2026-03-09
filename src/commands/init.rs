@@ -31,8 +31,46 @@ fn validate_domain(domain: &str) -> Result<()> {
     Ok(())
 }
 
-/// Kill a stale daemon process. Reads PID from the PID file, sends SIGTERM,
-/// then SIGKILL if needed. Also removes stale socket and PID files.
+/// Check whether the process at `pid` is a devproxy process by inspecting
+/// its command line. Returns false if we cannot determine (e.g., process
+/// belongs to another user) -- we err on the side of not killing.
+fn is_devproxy_process(pid: i32) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, use `ps -p <pid> -o comm=` to get the process name.
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let comm = String::from_utf8_lossy(&out.stdout);
+                comm.trim().ends_with("devproxy")
+            }
+            _ => false,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // On Linux, read /proc/<pid>/exe symlink.
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe"));
+        match exe {
+            Ok(path) => path
+                .file_name()
+                .map(|n| n == "devproxy")
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Kill a stale daemon process. Reads PID from the PID file, validates it
+/// is actually a devproxy process (to avoid PID reuse races), then sends
+/// SIGTERM/SIGKILL. Also removes stale socket and PID files.
 fn kill_stale_daemon() -> Result<()> {
     let pid_path = Config::pid_path()?;
     let socket_path = Config::socket_path()?;
@@ -40,23 +78,48 @@ fn kill_stale_daemon() -> Result<()> {
     if pid_path.exists() {
         let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            // Check if process is alive
-            let alive = unsafe { libc::kill(pid, 0) } == 0;
-            if alive {
+            // Check if process is alive. kill(pid, 0) returns 0 if we can
+            // signal it, or -1 with EPERM if it exists but we lack permission.
+            let ret = unsafe { libc::kill(pid, 0) };
+            let alive = ret == 0;
+            let alive_but_no_perms = ret == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+
+            if alive_but_no_perms {
                 eprintln!(
-                    "{} killing stale daemon (pid: {pid})...",
-                    "info:".cyan()
+                    "{} stale daemon (pid: {pid}) is running but owned by another user.",
+                    "warn:".yellow()
                 );
-                // Send SIGTERM first
-                unsafe { libc::kill(pid, libc::SIGTERM); }
-                // Wait briefly for graceful shutdown
-                std::thread::sleep(Duration::from_millis(500));
-                // Check if still alive, send SIGKILL
-                if unsafe { libc::kill(pid, 0) } == 0 {
-                    unsafe { libc::kill(pid, libc::SIGKILL); }
-                    std::thread::sleep(Duration::from_millis(200));
+                eprintln!(
+                    "  try: sudo kill {pid}"
+                );
+                // Don't remove PID/socket files -- the daemon is still running
+                return Ok(());
+            }
+
+            if alive {
+                // Verify this is actually a devproxy process, not a recycled PID
+                if !is_devproxy_process(pid) {
+                    eprintln!(
+                        "{} PID {pid} is no longer a devproxy process (PID was recycled), cleaning up stale files",
+                        "info:".cyan()
+                    );
+                    // Fall through to file cleanup
+                } else {
+                    eprintln!(
+                        "{} killing stale daemon (pid: {pid})...",
+                        "info:".cyan()
+                    );
+                    unsafe { libc::kill(pid, libc::SIGTERM); }
+                    // Wait briefly for graceful shutdown
+                    std::thread::sleep(Duration::from_millis(500));
+                    // Check if still alive, send SIGKILL
+                    if unsafe { libc::kill(pid, 0) } == 0 {
+                        unsafe { libc::kill(pid, libc::SIGKILL); }
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    eprintln!("{} stale daemon killed", "ok:".green());
                 }
-                eprintln!("{} stale daemon killed", "ok:".green());
             }
         }
         let _ = std::fs::remove_file(&pid_path);
@@ -70,20 +133,34 @@ fn kill_stale_daemon() -> Result<()> {
     Ok(())
 }
 
-/// Wait for the daemon to become responsive by polling the IPC socket.
-/// Returns Ok(()) if the daemon responds to a ping within the timeout,
-/// or an error if it doesn't.
+/// Wait for the daemon to become responsive by polling the IPC socket
+/// with an actual JSON ping/pong exchange. Returns Ok(()) if the daemon
+/// responds to a Ping within the timeout, or an error if it doesn't.
 fn wait_for_daemon(timeout: Duration) -> Result<()> {
     let socket_path = Config::socket_path()?;
     let start = std::time::Instant::now();
     let poll_interval = Duration::from_millis(100);
 
     while start.elapsed() < timeout {
-        if socket_path.exists()
-            && std::os::unix::net::UnixStream::connect(&socket_path).is_ok()
-        {
-            // Socket is connectable -- daemon is likely alive
-            return Ok(());
+        if socket_path.exists() {
+            // Attempt a real IPC ping to verify the daemon is fully operational,
+            // not just accepting connections.
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                use std::io::{BufRead, Write};
+                stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
+                stream.set_write_timeout(Some(Duration::from_secs(1))).ok();
+                let ping = b"{\"cmd\":\"ping\"}\n";
+                if stream.write_all(ping).is_ok() {
+                    stream.shutdown(std::net::Shutdown::Write).ok();
+                    let mut reader = std::io::BufReader::new(&stream);
+                    let mut response = String::new();
+                    if reader.read_line(&mut response).is_ok()
+                        && response.contains("pong")
+                    {
+                        return Ok(());
+                    }
+                }
+            }
         }
         std::thread::sleep(poll_interval);
     }
@@ -289,17 +366,6 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     eprintln!("  {} Add a devproxy.port label to your docker-compose.yml", "3.".bold());
     eprintln!();
     eprintln!("  {} Run: devproxy up", "4.".bold());
-
-    if port == 443 && !no_daemon {
-        eprintln!();
-        eprintln!(
-            "  {} The daemon is listening on port 443 which requires sudo.",
-            "note:".yellow()
-        );
-        eprintln!(
-            "  If the daemon failed to bind, re-run: sudo devproxy init --domain {domain}"
-        );
-    }
 
     Ok(())
 }

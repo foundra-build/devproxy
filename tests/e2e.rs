@@ -859,38 +859,49 @@ fn test_daemon_writes_pid_file() {
     );
 }
 
-/// Verify re-init kills the stale daemon process
+/// Verify re-init kills the stale daemon process.
+/// Leaves daemon1 running and lets init's kill_stale_daemon handle the kill.
 #[test]
 #[ignore]
 fn test_reinit_kills_stale_daemon() {
     let config_dir = create_test_config_dir("reinit");
     let daemon_port1 = find_free_port();
-    let daemon1 = start_test_daemon(&config_dir, daemon_port1);
+    let mut daemon1 = start_test_daemon(&config_dir, daemon_port1);
     let pid1 = daemon1.child.id();
 
-    // Verify first daemon is alive
+    // Verify first daemon is alive and has a PID file
     let pid_path = config_dir.join("daemon.pid");
     assert!(pid_path.exists(), "PID file should exist after first daemon start");
+    let saved_pid: u32 = std::fs::read_to_string(&pid_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(saved_pid, pid1, "PID file should match daemon PID");
 
-    // Don't let daemon1's Drop clean up the config dir -- we need it for init
-    let mut daemon1 = daemon1;
+    // Detach daemon1 from the guard so Drop does NOT kill it --
+    // we want init's kill_stale_daemon to handle that.
     daemon1.config_dir = PathBuf::new();
-    // Don't kill the child -- init should do it
-    // But we need to forget the child so Drop doesn't kill it
-    // Actually, we DO let Drop kill it since we're testing init's behavior.
-    // Let's just remember the PID and kill it ourselves.
-    let _ = daemon1.child.kill();
-    let _ = daemon1.child.wait();
+    // We must NOT call child.kill() here. Instead, leak the Child so
+    // the daemon stays alive for init to find and kill.
+    let child = std::mem::replace(
+        &mut daemon1.child,
+        // Replace with a dummy child that we can safely drop.
+        // Spawn a trivial process that exits immediately.
+        Command::new("true").spawn().unwrap(),
+    );
     drop(daemon1);
+    // Forget the original child so its Drop doesn't kill the daemon.
+    std::mem::forget(child);
 
-    // Remove the socket so init doesn't find it responsive
-    let socket_path = config_dir.join("devproxy.sock");
-    let _ = std::fs::remove_file(&socket_path);
+    // Verify the old daemon is still alive
+    assert_eq!(
+        unsafe { libc::kill(pid1 as i32, 0) },
+        0,
+        "daemon1 should still be alive before re-init"
+    );
 
-    // Write the old PID file back (simulating a stale daemon)
-    std::fs::write(&pid_path, pid1.to_string()).unwrap();
-
-    // Run init with a new port
+    // Run init with a new port -- this should kill the old daemon
     let daemon_port2 = find_free_port();
     let output = Command::new(devproxy_bin())
         .args([
@@ -905,11 +916,23 @@ fn test_reinit_kills_stale_daemon() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     eprintln!("reinit stderr: {stderr}");
 
-    // init should succeed and start a new daemon
+    // init should have killed the stale daemon and started a new one
     assert!(output.status.success(), "init should succeed: {stderr}");
+    assert!(
+        stderr.contains("killing stale daemon"),
+        "init should report killing stale daemon: {stderr}"
+    );
     assert!(
         stderr.contains("daemon started"),
         "init should report daemon started: {stderr}"
+    );
+
+    // Old daemon should be dead
+    std::thread::sleep(Duration::from_millis(200));
+    assert_ne!(
+        unsafe { libc::kill(pid1 as i32, 0) },
+        0,
+        "old daemon (pid {pid1}) should be dead after re-init"
     );
 
     // New PID should be different from old one
@@ -918,7 +941,13 @@ fn test_reinit_kills_stale_daemon() {
     assert_ne!(new_pid, pid1, "new daemon should have a different PID");
 
     // Clean up the new daemon
-    unsafe { libc::kill(new_pid as i32, libc::SIGTERM); }
+    let kill_ret = unsafe { libc::kill(new_pid as i32, libc::SIGTERM) };
+    if kill_ret != 0 {
+        eprintln!(
+            "warning: failed to kill new daemon (pid {new_pid}): {}",
+            std::io::Error::last_os_error()
+        );
+    }
     std::thread::sleep(Duration::from_millis(500));
     let _ = std::fs::remove_dir_all(&config_dir);
 }
