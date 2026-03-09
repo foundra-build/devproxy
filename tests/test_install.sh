@@ -96,7 +96,9 @@ echo "=== Test 1: OS/arch detection ==="
 for combo in "Darwin:arm64:aarch64-apple-darwin" \
              "Darwin:x86_64:x86_64-apple-darwin" \
              "Linux:x86_64:x86_64-unknown-linux-gnu" \
-             "Linux:aarch64:aarch64-unknown-linux-gnu"; do
+             "Linux:aarch64:aarch64-unknown-linux-gnu" \
+             "Linux:amd64:x86_64-unknown-linux-gnu" \
+             "Linux:arm64:aarch64-unknown-linux-gnu"; do
     os="$(echo "$combo" | cut -d: -f1)"
     arch="$(echo "$combo" | cut -d: -f2)"
     expected="$(echo "$combo" | cut -d: -f3)"
@@ -208,10 +210,19 @@ mkdir -p "$MOCK_DIR/latest/download"
 # Create a mock binary (shell script that echoes version)
 # Determine the current platform's target triple for the mock binary filename
 _mock_arch="$(uname -m | sed 's/arm64/aarch64/')"
+_mock_os=""
 case "$(uname -s)" in
     Darwin) _mock_os="apple-darwin" ;;
     Linux)  _mock_os="unknown-linux-gnu" ;;
+    *)      echo "  SKIP: e2e tests not supported on $(uname -s)" ;;
 esac
+
+if [ -z "$_mock_os" ]; then
+    # Skip e2e tests (4 and 5) on unsupported host platforms
+    echo "=== Test 5: Download failure (404) ==="
+    echo "  SKIP: e2e tests not supported on $(uname -s)"
+else
+
 MOCK_BINARY="$MOCK_DIR/latest/download/devproxy-${_mock_arch}-${_mock_os}"
 cat > "$MOCK_BINARY" <<'MOCKBIN'
 #!/bin/sh
@@ -294,6 +305,8 @@ else
         fail "404 exited non-zero but no error in output" "$output"
     fi
 fi
+
+fi  # end of _mock_os check for e2e tests (Tests 4 and 5)
 
 # ============================================================
 # Test 6: Missing downloader

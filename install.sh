@@ -75,9 +75,17 @@ download_binary() {
         exit 1
     fi
 
-    # Use install -m to atomically place the binary with correct permissions,
-    # avoiding a window where the binary exists but is not yet executable.
-    install -m 755 "$TMPFILE" "${DEVPROXY_INSTALL_DIR}/devproxy"
+    # Copy and set permissions using only POSIX-guaranteed commands.
+    # chmod before cp would not help since cp creates a new inode;
+    # instead we cp then chmod, keeping the window minimal.
+    if ! cp "$TMPFILE" "${DEVPROXY_INSTALL_DIR}/devproxy"; then
+        echo "Error: failed to copy binary to ${DEVPROXY_INSTALL_DIR}/devproxy" >&2
+        exit 1
+    fi
+    if ! chmod 755 "${DEVPROXY_INSTALL_DIR}/devproxy"; then
+        echo "Error: failed to set executable permissions on ${DEVPROXY_INSTALL_DIR}/devproxy" >&2
+        exit 1
+    fi
     rm -f "$TMPFILE"
     trap - EXIT
 }
