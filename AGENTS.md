@@ -19,6 +19,7 @@ just build    # cargo build --release
 - **Single binary** with a background daemon mode (`devproxy daemon` — hidden subcommand)
 - **CLI → daemon IPC** over Unix domain socket (`~/.config/devproxy/devproxy.sock`)
 - **Docker is source of truth** — no persistent state files
+- **Socket activation**: launchd (macOS) / systemd (Linux) bind privileged ports and pass fds to the daemon, which runs as the current user (no sudo for daemon startup)
 - **Async runtime**: tokio with two main tasks joined via `tokio::join!`
   - HTTPS reverse proxy (tokio-rustls + hyper)
   - Docker event watcher (streams `docker events`)
@@ -40,10 +41,19 @@ src/
 ├── config.rs        — configuration and compose file parsing
 ├── slugs.rs         — random slug generator
 ├── ipc.rs           — Unix socket IPC client
-├── proxy/           — daemon internals (cert, router, docker watcher)
+├── platform.rs      — launchd/systemd daemon lifecycle (install, stop, restart)
+├── proxy/
+│   ├── mod.rs       — run_daemon(): joins https_proxy + docker_watcher tasks
+│   ├── socket_activation.rs — fd acquisition from launchd/systemd
+│   ├── cert.rs      — rcgen CA + wildcard cert generation, OS trust
+│   ├── router.rs    — in-memory route table
+│   └── docker.rs    — Docker event watcher + route loading
 └── commands/        — CLI command implementations
 docs/
 └── spec.md          — full project specification
+tests/
+├── e2e.rs           — CLI integration tests
+└── linux-docker/    — Docker-based Linux e2e tests (systemd, setcap, LISTEN_FDS)
 ```
 
 ## Dependencies

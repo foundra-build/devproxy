@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/foundra-build/devproxy/main/install
 ## Quick Start
 
 ```bash
-# one-time setup
+# one-time setup (no sudo needed — uses launchd/systemd socket activation)
 devproxy init --domain mysite.dev
 
 # in any project with devproxy.port label
@@ -49,14 +49,16 @@ devproxy up
 
 ## Commands
 
-| Command           | Description                                  |
-|-------------------|----------------------------------------------|
-| `devproxy init`   | One-time setup: certs, CA trust, daemon      |
-| `devproxy up`     | Start project, assign slug, proxy it         |
-| `devproxy down`   | Stop project, clean up override              |
-| `devproxy ls`     | List running projects with URLs              |
-| `devproxy open`   | Open project URL in browser                  |
-| `devproxy status` | Daemon health check                          |
+| Command              | Description                                  |
+|----------------------|----------------------------------------------|
+| `devproxy init`      | One-time setup: certs, CA trust, daemon      |
+| `devproxy up`        | Start project, assign slug, proxy it         |
+| `devproxy down`      | Stop project, clean up override              |
+| `devproxy ls`        | List running projects with URLs              |
+| `devproxy open`      | Open project URL in browser                  |
+| `devproxy status`    | Daemon health check                          |
+| `devproxy update`    | Check for updates and self-update            |
+| `devproxy --version` | Show installed version                       |
 
 ## Development
 

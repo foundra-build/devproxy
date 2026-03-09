@@ -55,14 +55,16 @@ docker compose down   # or devproxy down — proxy self-heals either way
 
 ### Other commands
 
-| Command           | Description                                           |
-|-------------------|-------------------------------------------------------|
-| `devproxy init`   | One-time setup: certs, CA trust, daemon               |
-| `devproxy up`     | Start this project, assign slug, write port override  |
-| `devproxy down`   | Convenience: compose down + remove override file      |
-| `devproxy ls`     | List all running projects with slugs and URLs         |
-| `devproxy open`   | Open this project's URL in the browser                |
-| `devproxy status` | Show daemon health and active route count             |
+| Command              | Description                                           |
+|----------------------|-------------------------------------------------------|
+| `devproxy init`      | One-time setup: certs, CA trust, daemon               |
+| `devproxy up`        | Start this project, assign slug, write port override  |
+| `devproxy down`      | Convenience: compose down + remove override file      |
+| `devproxy ls`        | List all running projects with slugs and URLs         |
+| `devproxy open`      | Open this project's URL in the browser                |
+| `devproxy status`    | Show daemon health and active route count             |
+| `devproxy update`    | Check for updates and self-update the binary          |
+| `devproxy --version` | Show installed version                                |
 
 ---
 
@@ -70,6 +72,11 @@ docker compose down   # or devproxy down — proxy self-heals either way
 
 ```
 devproxy daemon  (one process, two async tasks via tokio::join!)
+│
+├── Socket activation (port binding)
+│     macOS: launchd passes pre-bound fd via launch_activate_socket()
+│     Linux: systemd passes fd via LISTEN_FDS/LISTEN_PID env vars
+│     Fallback: direct TcpListener::bind() for dev/test
 │
 ├── HTTPS proxy  :443
 │     tokio-rustls accept loop
@@ -80,6 +87,10 @@ devproxy daemon  (one process, two async tasks via tokio::join!)
       container start → inspect → insert route into Router
       container die   → remove route from Router
 ```
+
+The daemon runs as the current user (no sudo). On macOS, `devproxy init` installs a
+LaunchAgent plist; launchd binds port 443 and passes the fd. On Linux, systemd user socket
+activation does the same. Falls back to `setcap cap_net_bind_service` if systemd is unavailable.
 
 ### How routing works
 
@@ -138,21 +149,24 @@ src/
 ├── config.rs             — Config (domain), ComposeFile parsing, Labels enum
 ├── slugs.rs              — random adjective-animal generator
 ├── ipc.rs                — Unix socket client (send/recv one JSON-line message)
+├── platform.rs           — launchd/systemd daemon lifecycle (install, stop, restart)
 │
 ├── proxy/
 │   ├── mod.rs            — run_daemon(): joins https_proxy + docker_watcher tasks
+│   ├── socket_activation.rs — fd acquisition from launchd/systemd
 │   ├── cert.rs           — rcgen CA + wildcard cert generation, OS trust
 │   ├── router.rs         — Arc<RwLock<HashMap<host, port>>> with get/insert/remove/list
 │   └── docker.rs         — load_routes() + watch_events() via `docker events`
 │
 └── commands/
     ├── mod.rs
-    ├── init.rs            — cert gen, CA trust, daemon spawn
+    ├── init.rs            — cert gen, CA trust, platform daemon install (or fallback spawn)
     ├── up.rs              — detect label, free port, write override, compose up
     ├── down.rs            — compose down, remove override file
     ├── ls.rs              — ipc List → pretty table
     ├── open.rs            — ipc List → open URL
     ├── status.rs          — ipc Ping
+    ├── update.rs          — self-update from GitHub releases
     └── daemon.rs          — proxy::run_daemon() entry point (hidden subcommand)
 ```
 
@@ -160,22 +174,12 @@ src/
 
 ## Dependencies
 
+See `Cargo.toml` for exact versions. Key crates:
+
 ```toml
-clap          = { version = "4", features = ["derive"] }
-serde         = { version = "1", features = ["derive"] }
-serde_json    = "1"
-serde_yaml    = "0.9"
-anyhow        = "1"
-dirs          = "5"
-colored       = "2"
-open          = "5"
-rand          = "0.8"
-tokio         = { version = "1", features = ["full"] }
-hyper         = { version = "0.14", features = ["http1", "server", "client"] }
-tokio-rustls  = "0.24"
-rustls        = "0.21"
-rustls-pemfile = "1"
-rcgen         = "0.12"
+clap, tokio, hyper (1.x), hyper-util, tokio-rustls, rustls,
+rcgen, serde, serde_json, serde_yaml, anyhow, colored, dirs,
+libc, semver
 ```
 
 No Caddy. No Traefik. No mkcert. No external proxy process.
@@ -184,16 +188,14 @@ No Caddy. No Traefik. No mkcert. No external proxy process.
 
 ## Open questions / future work
 
-- **Daemon persistence**: currently spawned with `std::process::Command`. A launchd plist
-  (macOS) or systemd unit (Linux) would survive reboots. Could be written by `devproxy init`.
+- ~~**Daemon persistence**: A launchd plist (macOS) or systemd unit (Linux) would survive reboots.~~ **Done** — `devproxy init` installs a LaunchAgent plist (macOS) or systemd user socket + service units (Linux). The daemon runs as the current user via socket activation.
+- ~~**Linux privileged port**: binding :443 requires `cap_net_bind_service` on Linux.~~ **Done** — systemd socket activation handles this. Falls back to `setcap cap_net_bind_service=+ep` when systemd is unavailable.
 - **Port TOCTOU**: the free-port trick (bind :0, release, use the number) has a small race.
   Acceptable for local dev; could be eliminated by letting the daemon allocate ports.
 - **Multiple services**: spec currently errors if more than one service has `devproxy.port`.
   Could support `devproxy.port=3000,devproxy.name=api` to allow multiple routes per project.
 - **HTTP → HTTPS redirect**: daemon currently only listens on :443. Add an :80 listener that
   301-redirects to HTTPS.
-- **Linux privileged port**: binding :443 requires `cap_net_bind_service` on Linux.
-  `devproxy init` should run `setcap` automatically or offer a port-forwarding alternative.
 - **Slug persistence**: slugs are stable for the lifetime of a running container but reset on
   `devproxy up`. Could offer `devproxy pin <slug>` to write the slug into a `.devproxy` file
   so the same slug is always used for a given project.

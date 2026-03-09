@@ -36,7 +36,7 @@ devproxy update
 devproxy init --domain mysite.dev
 ```
 
-This generates a local CA + wildcard TLS cert, trusts the CA in the system keychain, and starts the background daemon.
+This generates a local CA + wildcard TLS cert, trusts the CA in the system keychain, and starts the background daemon. On macOS, the daemon runs via launchd socket activation as your user — **no sudo required**. On Linux, it uses systemd socket activation (or setcap fallback).
 
 **DNS setup (required):** Wildcard DNS must point `*.mysite.dev` to 127.0.0.1. `/etc/hosts` does NOT support wildcards, so use dnsmasq:
 
@@ -105,12 +105,19 @@ devproxy open     # opens URL in browser
 - No state files — Docker is the source of truth
 - Config lives at `~/.config/devproxy/` (certs, socket, config)
 
+### Daemon Lifecycle
+
+- **macOS**: `devproxy init` installs a LaunchAgent plist at `~/Library/LaunchAgents/com.devproxy.daemon.plist`. launchd binds port 443 and passes the socket fd to the daemon, which runs as your user (no sudo).
+- **Linux**: Uses systemd user socket activation (`~/.config/systemd/user/devproxy.socket` + `devproxy.service`). Falls back to `setcap cap_net_bind_service` if systemd is unavailable.
+- `devproxy update` replaces the binary and uses `launchctl kickstart -k` (macOS) or `systemctl --user restart` (Linux) to restart the daemon with the new version.
+- `sudo` is only needed for one-time DNS setup and CA trust — never for daemon startup.
+
 ## Common Issues
 
 | Problem | Fix |
 |---------|-----|
 | "Connection refused" on HTTPS | Check daemon: `devproxy status`. Restart with `devproxy init` |
-| Port 443 requires sudo (Linux) | Use `devproxy init --port 8443` or grant `cap_net_bind_service` |
+| Port 443 requires sudo (Linux) | Normally handled by systemd socket activation. Fallback: `sudo setcap cap_net_bind_service=+ep $(which devproxy)` or use `devproxy init --port 8443` |
 | DNS not resolving `*.mysite.dev` | Add `127.0.0.1 slug.mysite.dev` to `/etc/hosts` or configure dnsmasq |
 | `.devproxy-override.yml` in git | Add it to `.gitignore` |
 | Slug changed after restart | Slugs are random per `devproxy up`. Pin not yet supported |
