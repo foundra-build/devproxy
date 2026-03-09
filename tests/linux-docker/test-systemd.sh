@@ -64,7 +64,6 @@ else
 fi
 
 # Cleanup
-devproxy init --domain test.dev --no-daemon 2>&1 || true
 systemctl --user stop devproxy.socket devproxy.service 2>/dev/null || true
 systemctl --user disable devproxy.socket 2>/dev/null || true
 rm -rf "$DEVPROXY_CONFIG_DIR"

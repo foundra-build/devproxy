@@ -3,9 +3,12 @@
 //! macOS: LaunchAgent plist with socket activation (like puma-dev).
 //! Linux: systemd user socket + service units, with setcap fallback.
 //!
-//! Key distinction: `stop_daemon()` halts the running daemon without removing
-//! unit/plist files (used by update and kill_stale_daemon). `uninstall_daemon()`
-//! stops AND removes files (used by init before re-installing).
+//! Key operations:
+//! - `install_daemon()` writes plist/unit files and starts the daemon.
+//! - `stop_daemon()` halts the running daemon without removing files
+//!   (used by kill_stale_daemon). Returns `Ok(true)` if it actually stopped
+//!   something, `Ok(false)` if there was nothing to stop.
+//! - `restart_daemon()` atomically restarts the daemon in-place (used by update).
 //!
 //! All public functions respect `DEVPROXY_NO_SOCKET_ACTIVATION` for test isolation
 //! and check for file existence before touching global system state.
@@ -327,17 +330,16 @@ pub fn install_daemon(binary_path: &Path, port: u16, config_dir: Option<&str>) -
 #[cfg(target_os = "macos")]
 fn bootout_launchagent() -> Result<()> {
     let uid = unsafe { libc::getuid() };
-    let status = std::process::Command::new("launchctl")
+    // Suppress stderr — bootout failing is expected on fresh install
+    // (agent not loaded) and during install's pre-bootstrap cleanup.
+    let output = std::process::Command::new("launchctl")
         .args(["bootout", &format!("gui/{uid}/{LAUNCHD_LABEL}")])
+        .stderr(std::process::Stdio::null())
         .status()
         .context("failed to run launchctl bootout")?;
 
-    if !status.success() {
-        // Not fatal — agent may not be loaded
-        eprintln!(
-            "  launchctl bootout returned {} (agent may not be loaded)",
-            status.code().unwrap_or(-1)
-        );
+    if !output.success() {
+        // Not fatal — agent may not be loaded. Callers handle this.
     }
     Ok(())
 }
@@ -506,13 +508,29 @@ fn install_systemd_units(binary_path: &str, port: u16, config_dir: Option<&str>)
 
 #[cfg(target_os = "linux")]
 fn stop_systemd_units() -> Result<()> {
-    // Stop without disabling or removing files
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "stop", &format!("{SYSTEMD_UNIT_NAME}.service")])
-        .status();
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "stop", &format!("{SYSTEMD_UNIT_NAME}.socket")])
-        .status();
+    // Stop without disabling or removing files.
+    // Log warnings on failure but don't bail — the caller will fall back
+    // to signal-based kill if the daemon is still alive.
+    for unit in [
+        format!("{SYSTEMD_UNIT_NAME}.service"),
+        format!("{SYSTEMD_UNIT_NAME}.socket"),
+    ] {
+        match std::process::Command::new("systemctl")
+            .args(["--user", "stop", &unit])
+            .status()
+        {
+            Ok(status) if !status.success() => {
+                eprintln!(
+                    "  warn: systemctl --user stop {unit} exited {}",
+                    status.code().unwrap_or(-1)
+                );
+            }
+            Err(e) => {
+                eprintln!("  warn: failed to run systemctl --user stop {unit}: {e}");
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 

@@ -129,9 +129,13 @@ fn acquire_systemd_fds() -> Result<Option<Vec<RawFd>>> {
     }
 
     // Unset the env vars so child processes don't inherit them
-    // (matches sd_listen_fds(1) behavior)
-    std::env::remove_var("LISTEN_PID");
-    std::env::remove_var("LISTEN_FDS");
+    // (matches sd_listen_fds(1) behavior).
+    // Safety: this function is only called once during daemon startup,
+    // before any threads are spawned, so there are no concurrent readers.
+    unsafe {
+        std::env::remove_var("LISTEN_PID");
+        std::env::remove_var("LISTEN_FDS");
+    }
 
     const SD_LISTEN_FDS_START: RawFd = 3;
     let fds: Vec<RawFd> =

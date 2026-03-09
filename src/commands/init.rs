@@ -434,7 +434,9 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
                                 "hint:".yellow(),
                                 crate::platform::LAUNCHD_LABEL
                             );
-                            eprintln!("  {} log: /tmp/devproxy-daemon.log", "hint:".yellow());
+                            if let Ok(log_path) = Config::daemon_log_path() {
+                                eprintln!("  {} log: {}", "hint:".yellow(), log_path.display());
+                            }
                         }
                         #[cfg(target_os = "linux")]
                         {

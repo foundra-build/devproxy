@@ -128,6 +128,7 @@ fn start_test_daemon(config_dir: &Path, port: u16) -> DaemonGuard {
     let child = Command::new(devproxy_bin())
         .args(["daemon", "--port", &port.to_string()])
         .env("DEVPROXY_CONFIG_DIR", config_dir)
+        .env("DEVPROXY_NO_SOCKET_ACTIVATION", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
