@@ -299,7 +299,7 @@ if output="$(PATH="$wrapper_dir:$PATH" \
    sh "$INSTALL_SCRIPT" 2>&1)"; then
     fail "404 should cause non-zero exit"
 else
-    if echo "$output" | grep -qi "error\|fail"; then
+    if echo "$output" | grep -Eqi "error|fail"; then
         pass "404 produces error message"
     else
         fail "404 exited non-zero but no error in output" "$output"
@@ -339,7 +339,7 @@ if output="$(PATH="$MINIMAL_BIN" \
    sh "$INSTALL_SCRIPT" 2>&1)"; then
     fail "missing downloader should cause non-zero exit"
 else
-    if echo "$output" | grep -qi "curl\|wget"; then
+    if echo "$output" | grep -Eqi "curl|wget"; then
         pass "missing downloader error mentions curl/wget"
     else
         fail "missing downloader exited non-zero but no curl/wget mention" "$output"
@@ -355,7 +355,7 @@ assert_file_contains() {
     _file="$1"
     _pattern="$2"
     _desc="$3"
-    if grep -q "$_pattern" "$_file"; then
+    if grep -Eq "$_pattern" "$_file"; then
         pass "$_desc"
     else
         fail "$_desc" "pattern '$_pattern' not found in $_file"
@@ -379,7 +379,7 @@ assert_line_before() {
 }
 
 # Darwin guard present
-assert_file_contains "$INSTALL_SCRIPT" 'uname -s.*Darwin\|Darwin' "install.sh contains Darwin guard"
+assert_file_contains "$INSTALL_SCRIPT" 'uname -s.*Darwin' "install.sh contains Darwin guard"
 assert_file_contains "$INSTALL_SCRIPT" 'xattr -cr' "install.sh contains xattr -cr"
 assert_file_contains "$INSTALL_SCRIPT" 'codesign --force --sign -' "install.sh contains codesign"
 
@@ -423,14 +423,14 @@ SKILL_MD="$REPO_ROOT/skills/devproxy/SKILL.md"
 
 assert_file_contains "$SKILL_MD" 'devproxy update' "SKILL.md contains 'devproxy update'"
 assert_file_contains "$SKILL_MD" 'devproxy --version' "SKILL.md contains 'devproxy --version'"
-assert_file_contains "$SKILL_MD" 'self-update\|Check for updates' "SKILL.md contains update description"
+assert_file_contains "$SKILL_MD" 'self-update|Check for updates' "SKILL.md contains update description"
 
 # ============================================================
 # Test 11: SKILL.md contains Gatekeeper common issue
 # ============================================================
 echo "=== Test 11: SKILL.md Gatekeeper common issue ==="
 
-assert_file_contains "$SKILL_MD" 'Gatekeeper\|quarantine' "SKILL.md mentions Gatekeeper/quarantine"
+assert_file_contains "$SKILL_MD" 'Gatekeeper|quarantine' "SKILL.md mentions Gatekeeper/quarantine"
 assert_file_contains "$SKILL_MD" 'xattr -cr' "SKILL.md mentions xattr -cr"
 assert_file_contains "$SKILL_MD" 'codesign' "SKILL.md mentions codesign"
 

@@ -96,9 +96,7 @@ download_binary() {
     # These are best-effort: if they fail (e.g., signing tools not available),
     # the binary is still installed and may work; warn but do not abort.
     if [ "$(uname -s)" = "Darwin" ]; then
-        if ! xattr -cr "${DEVPROXY_INSTALL_DIR}/devproxy" 2>/dev/null; then
-            echo "Warning: failed to clear quarantine attributes; Gatekeeper may block the binary" >&2
-        fi
+        xattr -cr "${DEVPROXY_INSTALL_DIR}/devproxy" 2>/dev/null || true
         if ! codesign --force --sign - "${DEVPROXY_INSTALL_DIR}/devproxy" 2>/dev/null; then
             echo "Warning: failed to ad-hoc sign binary; Gatekeeper may kill the binary on first run" >&2
         fi

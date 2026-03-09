@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
+use std::path::Path;
 
 #[derive(serde::Deserialize)]
 struct GitHubRelease {
@@ -38,9 +39,78 @@ fn is_newer_version(current: &str, remote: &str) -> bool {
     let remote = semver::Version::parse(remote);
     match (current, remote) {
         (Ok(c), Ok(r)) => r > c,
-        // If either fails to parse, fall back to string inequality
+        // If either fails to parse, assume no update is needed
         _ => false,
     }
+}
+
+/// Download a file from `url` to `dest` using curl.
+fn download_file(url: &str, dest: &Path) -> Result<()> {
+    let dl_output = std::process::Command::new("curl")
+        .args(["-fsSL", "-o"])
+        .arg(dest)
+        .arg(url)
+        .output()
+        .context("failed to run curl to download update")?;
+
+    if !dl_output.status.success() {
+        let stderr = String::from_utf8_lossy(&dl_output.stderr);
+        bail!("failed to download update from {url}: {stderr}");
+    }
+    Ok(())
+}
+
+/// Set permissions and codesign the binary at `path`.
+fn prepare_binary(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .context("failed to set permissions on downloaded binary")?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("xattr")
+            .arg("-cr")
+            .arg(path)
+            .output();
+        let _ = std::process::Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(path)
+            .output();
+    }
+
+    Ok(())
+}
+
+/// Replace the binary at `exe_path` with the one at `tmpfile`.
+/// Tries atomic rename first, falls back to copy on cross-device errors.
+/// Provides a permission hint on failure.
+fn replace_binary(tmpfile: &Path, exe_path: &Path) -> Result<()> {
+    let result = match std::fs::rename(tmpfile, exe_path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            std::fs::copy(tmpfile, exe_path)
+                .map(|_| ())
+                .context("failed to copy new binary over existing one")
+        }
+        Err(e) => Err(anyhow::Error::new(e).context("failed to replace binary")),
+    };
+
+    if let Err(ref e) = result {
+        // Check if this looks like a permission error and provide a hint
+        let msg = format!("{e:#}");
+        if msg.contains("ermission") {
+            eprintln!(
+                "{} try running with sudo, or re-run the install script:\n  \
+                 curl -fsSL https://raw.githubusercontent.com/foundra-build/devproxy/main/install.sh | sh",
+                "hint:".yellow()
+            );
+        }
+    }
+
+    result
 }
 
 pub async fn run() -> Result<()> {
@@ -86,81 +156,19 @@ fn run_blocking() -> Result<()> {
         "info:".cyan()
     );
 
-    // Stop daemon before replacing binary, so there is a clean transition.
-    // Config::socket_path() is a static method that does not depend on
-    // loading a project config, so it works from any directory.
-    let socket_path = crate::config::Config::socket_path()?;
-    if socket_path.exists()
-        && crate::ipc::ping_sync(&socket_path, std::time::Duration::from_secs(2))
-    {
-        eprintln!("{} stopping daemon for update...", "info:".cyan());
-        super::init::kill_stale_daemon()?;
-    }
-
-    // Download new binary
+    // Download new binary to a tmpfile first, before touching the daemon
+    // or the existing binary. If the download fails, nothing has changed.
     let download_url = format!(
         "https://github.com/foundra-build/devproxy/releases/latest/download/devproxy-{target}"
     );
     let exe_path = std::env::current_exe().context("could not determine binary path")?;
     let tmpfile = exe_path.with_extension("tmp");
 
-    let download_result = (|| -> Result<()> {
-        let dl_output = std::process::Command::new("curl")
-            .args([
-                "-fsSL",
-                "-o",
-                &tmpfile.to_string_lossy(),
-                &download_url,
-            ])
-            .output()
-            .context("failed to run curl to download update")?;
-
-        if !dl_output.status.success() {
-            let stderr = String::from_utf8_lossy(&dl_output.stderr);
-            bail!("failed to download update from {download_url}: {stderr}");
-        }
-
-        // chmod 755
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmpfile, std::fs::Permissions::from_mode(0o755))
-                .context("failed to set permissions on downloaded binary")?;
-        }
-
-        // macOS: clear quarantine and ad-hoc sign
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("xattr")
-                .args(["-cr", &tmpfile.to_string_lossy()])
-                .output();
-            let _ = std::process::Command::new("codesign")
-                .args(["--force", "--sign", "-", &tmpfile.to_string_lossy()])
-                .output();
-        }
-
-        // Replace binary. Try rename first (atomic, but only works on same
-        // filesystem). If rename fails with EXDEV (cross-device link), fall
-        // back to copy + remove.
-        match std::fs::rename(&tmpfile, &exe_path) {
-            Ok(()) => {}
-            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-                std::fs::copy(&tmpfile, &exe_path)
-                    .context("failed to copy new binary over existing one")?;
-                let _ = std::fs::remove_file(&tmpfile);
-            }
-            Err(e) => {
-                return Err(anyhow::Error::new(e).context("failed to replace binary"));
-            }
-        }
-
-        Ok(())
-    })();
-
-    // Clean up tmpfile on error
-    if download_result.is_err() {
+    // Ensure tmpfile is cleaned up on any error path
+    let result = do_update(&download_url, &exe_path, &tmpfile);
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmpfile);
-        return download_result;
+        return result;
     }
 
     eprintln!(
@@ -172,6 +180,29 @@ fn run_blocking() -> Result<()> {
         "info:".cyan(),
         "devproxy init".bold()
     );
+
+    Ok(())
+}
+
+fn do_update(download_url: &str, exe_path: &Path, tmpfile: &Path) -> Result<()> {
+    download_file(download_url, tmpfile)?;
+    prepare_binary(tmpfile)?;
+
+    // Stop daemon after download succeeds but before binary replacement,
+    // so a download failure is a no-op (daemon stays running), and the
+    // binary replacement happens with no running daemon for a clean transition.
+    let socket_path = crate::config::Config::socket_path()?;
+    if socket_path.exists()
+        && crate::ipc::ping_sync(&socket_path, std::time::Duration::from_secs(2))
+    {
+        eprintln!("{} stopping daemon for update...", "info:".cyan());
+        super::init::kill_stale_daemon()?;
+    }
+
+    replace_binary(tmpfile, exe_path)?;
+
+    // Clean up tmpfile if copy fallback left it behind
+    let _ = std::fs::remove_file(tmpfile);
 
     Ok(())
 }
