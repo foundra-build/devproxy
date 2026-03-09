@@ -1,0 +1,27 @@
+{
+  "name": "devproxy",
+  "owner": {
+    "name": "Foundra",
+    "email": "hello@foundra.build"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for devproxy — local HTTPS dev subdomains for Docker Compose projects"
+  },
+  "plugins": [
+    {
+      "name": "devproxy",
+      "source": ".",
+      "description": "Skills for setting up and using devproxy — local HTTPS dev subdomains for Docker Compose projects",
+      "version": "0.3.0",
+      "author": {
+        "name": "Foundra"
+      },
+      "homepage": "https://github.com/foundra-build/devproxy",
+      "repository": "https://github.com/foundra-build/devproxy",
+      "license": "MIT",
+      "keywords": ["devproxy", "https", "docker", "proxy", "tls", "dev-environment", "local-dev"],
+      "category": "developer-tools",
+      "tags": ["docker", "https", "proxy", "local-development"]
+    }
+  ]
+}

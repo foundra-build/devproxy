@@ -60,6 +60,26 @@ devproxy up
 | `devproxy update`    | Check for updates and self-update            |
 | `devproxy --version` | Show installed version                       |
 
+## Claude Code Plugin
+
+devproxy includes a [Claude Code](https://claude.com/claude-code) plugin with skills for guided setup and usage help.
+
+### Install the plugin
+
+```
+/plugin marketplace add foundra-build/devproxy
+/plugin install devproxy@devproxy
+```
+
+### Available skills
+
+| Skill | Trigger | What it does |
+|-------|---------|--------------|
+| `devproxy` | Mention "devproxy", Docker HTTPS, dev subdomains | Commands reference, troubleshooting, how-it-works |
+| `setup` | "set up devproxy", "install devproxy" | Guided interactive walkthrough for first-time setup |
+
+Use `/devproxy:setup` for a step-by-step guided installation, or just ask about devproxy and the general skill will activate automatically.
+
 ## Development
 
 ```bash
