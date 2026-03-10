@@ -18,6 +18,7 @@ Local HTTPS dev subdomains for Docker Compose projects. Single Rust binary — n
 | `devproxy up`                    | Assign slug, bind port, `docker compose up -d`  |
 | `devproxy down`                  | `docker compose down` + remove override file    |
 | `devproxy ls`                    | List running projects with slugs and URLs       |
+| `devproxy get-url`               | Print this project's proxy URL (for scripting)  |
 | `devproxy open`                  | Open this project's URL in browser              |
 | `devproxy update`                | Check for updates and self-update the binary    |
 | `devproxy --version`             | Show installed version                          |

@@ -21,6 +21,7 @@ async fn main() -> anyhow::Result<()> {
         } => commands::init::run(&domain, port, no_daemon),
         Commands::Up => commands::up::run(),
         Commands::Down => commands::down::run(),
+        Commands::GetUrl => commands::get_url::run(),
         Commands::Ls => commands::ls::run().await,
         Commands::Open => commands::open::run().await,
         Commands::Status => commands::status::run().await,

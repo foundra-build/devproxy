@@ -31,6 +31,8 @@ pub enum Commands {
     Down,
     /// List all running projects with slugs and URLs
     Ls,
+    /// Print this project's proxy URL (empty + exit 1 if not running)
+    GetUrl,
     /// Open this project's URL in the browser
     Open,
     /// Show daemon health and active route count
