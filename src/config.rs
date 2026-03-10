@@ -319,7 +319,12 @@ pub fn compose_slug(random_slug: &str, app_name: &str) -> String {
     if composite.len() <= 63 {
         return composite;
     }
-    composite.chars().take(63).collect::<String>().trim_end_matches('-').to_string()
+    composite
+        .chars()
+        .take(63)
+        .collect::<String>()
+        .trim_end_matches('-')
+        .to_string()
 }
 
 /// Find a free ephemeral port
@@ -487,7 +492,12 @@ services:
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["remote", "add", "origin", "https://github.com/user/my-cool-app.git"])
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/user/my-cool-app.git",
+            ])
             .current_dir(dir.path())
             .output()
             .unwrap();
@@ -504,7 +514,12 @@ services:
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["remote", "add", "origin", "git@github.com:user/another-app.git"])
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:user/another-app.git",
+            ])
             .current_dir(dir.path())
             .output()
             .unwrap();
@@ -573,16 +588,29 @@ services:
 
     #[test]
     fn compose_slug_basic() {
-        assert_eq!(compose_slug("swift-penguin", "devproxy"), "swift-penguin-devproxy");
+        assert_eq!(
+            compose_slug("swift-penguin", "devproxy"),
+            "swift-penguin-devproxy"
+        );
     }
 
     #[test]
     fn compose_slug_truncates_to_63_chars() {
         let long_app = "a".repeat(100);
         let result = compose_slug("swift-penguin", &long_app);
-        assert!(result.len() <= 63, "composite slug must fit in a DNS label: len={}", result.len());
-        assert!(!result.ends_with('-'), "should not end with hyphen after truncation");
-        assert!(result.starts_with("swift-penguin-"), "should preserve the random slug prefix");
+        assert!(
+            result.len() <= 63,
+            "composite slug must fit in a DNS label: len={}",
+            result.len()
+        );
+        assert!(
+            !result.ends_with('-'),
+            "should not end with hyphen after truncation"
+        );
+        assert!(
+            result.starts_with("swift-penguin-"),
+            "should preserve the random slug prefix"
+        );
     }
 
     #[test]

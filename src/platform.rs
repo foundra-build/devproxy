@@ -57,9 +57,8 @@ pub fn generate_launchagent_plist(
     // launchd provides a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) that
     // excludes /usr/local/bin (Docker on macOS) and ~/.local/bin. Include
     // the common paths so the daemon can find docker, etc.
-    let path_value = std::env::var("PATH").unwrap_or_else(|_| {
-        "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string()
-    });
+    let path_value = std::env::var("PATH")
+        .unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string());
     let path_value = xml_escape(&path_value);
 
     let mut env_entries = format!(
