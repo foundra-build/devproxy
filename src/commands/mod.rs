@@ -4,6 +4,7 @@ pub mod get_url;
 pub mod init;
 pub mod ls;
 pub mod open;
+pub mod restart;
 pub mod status;
 pub mod up;
 pub mod update;

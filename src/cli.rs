@@ -37,6 +37,8 @@ pub enum Commands {
     Open,
     /// Show daemon health and active route count
     Status,
+    /// Restart the daemon
+    Restart,
     /// Check for updates and self-update the binary
     Update,
     /// Run the proxy daemon (internal, hidden)
@@ -46,4 +48,18 @@ pub enum Commands {
         #[arg(long, default_value = "443")]
         port: u16,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_restart_command() {
+        let cli = Cli::try_parse_from(["devproxy", "restart"]).expect("should parse restart");
+        assert!(
+            matches!(cli.command, Commands::Restart),
+            "should parse as Restart variant"
+        );
+    }
 }
