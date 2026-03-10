@@ -258,9 +258,9 @@ mod tests {
 
         impl Drop for KeychainCleanup {
             fn drop(&mut self) {
-                // Remove trust setting
+                // Remove trust setting from the user trust store
                 let _ = std::process::Command::new("security")
-                    .args(["remove-trusted-cert", "-d"])
+                    .args(["remove-trusted-cert"])
                     .arg(&self.cert_path)
                     .status();
 

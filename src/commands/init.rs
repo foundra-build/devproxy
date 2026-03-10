@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::proxy::cert;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::time::Duration;
 
@@ -56,10 +56,7 @@ pub fn is_devproxy_process(pid: i32) -> bool {
         // On Linux, read /proc/<pid>/exe symlink.
         let exe = std::fs::read_link(format!("/proc/{pid}/exe"));
         match exe {
-            Ok(path) => path
-                .file_name()
-                .map(|n| n == "devproxy" || n == "devproxy-daemon")
-                .unwrap_or(false),
+            Ok(path) => path.file_name().map(|n| n == "devproxy" || n == "devproxy-daemon").unwrap_or(false),
             Err(_) => false,
         }
     }
@@ -331,11 +328,7 @@ pub fn install_daemon_binary(src: &std::path::Path, dest: &std::path::Path) -> R
 
     super::update::prepare_binary(dest)?;
 
-    eprintln!(
-        "{} daemon binary installed at {}",
-        "ok:".green(),
-        dest.display()
-    );
+    eprintln!("{} daemon binary installed at {}", "ok:".green(), dest.display());
     Ok(())
 }
 
