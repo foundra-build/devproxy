@@ -4,12 +4,14 @@
 
 **Goal:** Fix all `cargo fmt` formatting violations so the GitHub Actions CI pipeline passes.
 
-**Architecture:** Run `cargo fmt` to auto-format all Rust source files, then verify the full CI check sequence (`fmt --check`, `clippy`, `test`) passes. No logic changes — formatting only.
+**Architecture:** Run `cargo fmt` to auto-format all Rust source files, then fix any pre-existing `clippy` lint warnings that were previously masked by the format failure, and verify the full CI check sequence (`fmt --check`, `clippy`, `test`) passes.
 
 **Tech Stack:** Rust toolchain (cargo fmt, clippy, cargo test)
 
 **Decision: Use `cargo fmt` auto-format rather than manual edits.**
 All 17 diffs across 5 files are standard rustfmt line-length and argument-wrapping reformats. Running `cargo fmt` is idiomatic, deterministic, and guaranteed to produce the exact output `cargo fmt -- --check` expects. Manual editing would be error-prone and pointless.
+
+**Note (discovered during implementation):** After `cargo fmt` fixes the format check, `cargo clippy` reveals 4 pre-existing `clippy::collapsible_if` warnings in `tests/e2e.rs` that were previously masked because CI failed at the earlier `fmt --check` step. These require collapsing nested `if`/`if let` chains into single `if ... && let ...` expressions — a semantically equivalent but AST-level change, not just whitespace.
 
 ---
 
@@ -44,7 +46,7 @@ Expected: exits 0 with no output (no remaining diffs).
 cargo clippy --all-targets -- -D warnings
 ```
 
-Expected: exits 0. Formatting changes cannot introduce clippy warnings, but this mirrors the CI step that was previously blocked by the format failure.
+Expected: exits 0. If pre-existing clippy warnings surface (previously masked by the format failure), fix them before proceeding.
 
 **Step 4: Run cargo test**
 
@@ -58,5 +60,5 @@ Expected: exits 0. Formatting changes cannot break tests, but this mirrors the C
 
 ```bash
 git add src/commands/init.rs src/commands/ls.rs src/config.rs src/platform.rs tests/e2e.rs
-git commit -m "style: apply cargo fmt to fix CI formatting check"
+git commit -m "style: apply cargo fmt and fix clippy collapsible-if warnings"
 ```
