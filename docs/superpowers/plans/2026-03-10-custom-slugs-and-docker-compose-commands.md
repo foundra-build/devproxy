@@ -1,6 +1,6 @@
 # Custom Slugs & Docker Compose Command Parity — Implementation Plan
 
-> **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
 
 **Goal:** Add `--slug` flag to `devproxy up` for predictable URLs, and introduce `stop`, `start`, `restart` (app stack), and `daemon restart` commands to mirror docker compose lifecycle.
 
@@ -25,7 +25,7 @@ The current `up.rs` checks the daemon AFTER writing override/project files and c
 The e2e tests have several references to the old CLI structure that must be updated:
 - `start_test_daemon()` calls `["daemon", "--port", ...]` — must become `["daemon", "run", "--port", ...]`
 - `test_restart_no_daemon` and `test_restart_running_daemon` test `devproxy restart` for daemon restart behavior — must be updated to test `devproxy daemon restart`
-- `test_help_output` asserts `daemon` is hidden from help — must be updated since `daemon` is now a visible subcommand group (only `daemon run` is hidden)
+- `test_cli_help` asserts `daemon` is hidden from help — must be updated since `daemon` is now a visible subcommand group (only `daemon run` is hidden)
 
 ### D3: `restart` e2e tests — rewrite vs. remove
 
@@ -943,9 +943,9 @@ To:
 .args(["daemon", "run", "--port", &port.to_string()])
 ```
 
-- [ ] **Step 2: Update `test_help_output`**
+- [ ] **Step 2: Update `test_cli_help`**
 
-In `test_help_output` (~line 228-247):
+In `test_cli_help` (~line 228-247):
 
 1. The assertion for `restart` (line 229) is still valid — `restart` is a visible command.
 2. Add assertions for `stop`, `start`, and `daemon`:
@@ -1224,5 +1224,5 @@ Expected: all show correct descriptions and options
 
 - [ ] **Step 4: Run non-Docker e2e tests**
 
-Run: `cargo test --test e2e test_cli_help_output test_cli_version test_restart_no_daemon 2>&1`
+Run: `cargo test --test e2e test_cli_help test_cli_version test_restart_no_daemon 2>&1`
 Expected: all pass
