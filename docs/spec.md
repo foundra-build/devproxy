@@ -25,7 +25,7 @@ devproxy init --domain mysite.dev
 ```
 
 - Generates a local CA and wildcard TLS cert using `rcgen` (pure Rust, no mkcert)
-- Trusts the CA in the system keychain (`security` on macOS, `update-ca-certificates` on Linux)
+- Trusts the CA in the OS certificate store (login keychain on macOS, `update-ca-certificates` on Linux)
 - Spawns the proxy daemon in the background
 - Prints instructions for wildcard DNS (dnsmasq or `/etc/hosts`)
 

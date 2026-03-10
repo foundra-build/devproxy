@@ -974,14 +974,15 @@ fn test_init_output_includes_ca_trust_path() {
     assert!(output.status.success(), "init should succeed");
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // The CA cert path should appear somewhere in the output -- either in
-    // the trust failure remediation instructions or (if trust succeeded)
-    // in the "Next steps" CA trust section. Since tests run without sudo,
-    // trust will fail and the path appears in the warning.
+    // With the login keychain, trust should succeed without sudo.
+    // If it does, the success message appears. If it fails for some
+    // other reason, the CA cert path appears in the fallback instructions.
     let ca_cert_path = config_dir.join("ca-cert.pem");
+    let trust_succeeded = stderr.contains("CA trusted in login keychain");
+    let path_shown = stderr.contains(&ca_cert_path.display().to_string());
     assert!(
-        stderr.contains(&ca_cert_path.display().to_string()),
-        "init output should include CA cert path '{}': {stderr}",
+        trust_succeeded || path_shown,
+        "init output should show trust success or CA cert path '{}': {stderr}",
         ca_cert_path.display()
     );
 

@@ -250,6 +250,8 @@ mod tests {
     fn trust_ca_login_keychain_roundtrip() {
         use std::path::PathBuf;
 
+        const TEST_CN: &str = "devproxy Test CA";
+
         /// Guard that removes the test certificate from the login keychain on drop.
         struct KeychainCleanup {
             cert_path: PathBuf,
@@ -266,19 +268,33 @@ mod tests {
 
                 // Remove the certificate itself
                 let _ = std::process::Command::new("security")
-                    .args(["delete-certificate", "-c", "devproxy Local CA"])
+                    .args(["delete-certificate", "-c", TEST_CN])
                     .arg(&self.keychain)
                     .status();
             }
         }
 
-        // Generate a fresh CA cert
-        let (ca_cert_pem, _ca_key_pem) = generate_ca().unwrap();
+        // Generate a CA cert with a distinct CN to avoid colliding with real devproxy CAs
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(DnType::CommonName, TEST_CN);
+        params
+            .distinguished_name
+            .push(DnType::OrganizationName, "devproxy");
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.not_before =
+            time::OffsetDateTime::now_utc() - std::time::Duration::from_secs(3600);
+        params.not_after =
+            time::OffsetDateTime::now_utc() + std::time::Duration::from_secs(3600);
+        let key_pair = KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
 
         // Write to a temp file
         let dir = tempfile::tempdir().unwrap();
         let cert_path = dir.path().join("test-ca.pem");
-        std::fs::write(&cert_path, &ca_cert_pem).unwrap();
+        std::fs::write(&cert_path, cert.pem()).unwrap();
 
         // Resolve login keychain path
         let home = dirs::home_dir().expect("could not determine home directory");
@@ -295,7 +311,7 @@ mod tests {
 
         // Verify the cert is findable in the login keychain
         let output = std::process::Command::new("security")
-            .args(["find-certificate", "-c", "devproxy Local CA", "-a"])
+            .args(["find-certificate", "-c", TEST_CN, "-a"])
             .arg(&keychain)
             .output()
             .expect("failed to run security find-certificate");

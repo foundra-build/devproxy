@@ -70,7 +70,7 @@ devproxy init --domain <chosen-domain>
 
 This will:
 - Generate a local CA and wildcard TLS certificate
-- Trust the CA in the system keychain (may prompt for password)
+- Trust the CA in the login keychain on macOS (prompts for keychain password once)
 - Install a LaunchAgent (macOS) or systemd unit (Linux) to run the daemon
 - Start the daemon via socket activation (no sudo needed for the daemon itself)
 
