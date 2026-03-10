@@ -108,6 +108,7 @@ pub fn generate_launchagent_plist(
     <array>
         <string>{binary_path}</string>
         <string>daemon</string>
+        <string>run</string>
         <string>--port</string>
         <string>{port}</string>
     </array>
@@ -177,7 +178,7 @@ After={SYSTEMD_UNIT_NAME}.socket
 
 [Service]
 Type=simple
-{env_line}ExecStart="{binary_path}" daemon --port {port}
+{env_line}ExecStart="{binary_path}" daemon run --port {port}
 Restart=on-failure
 RestartSec=5
 
@@ -607,6 +608,7 @@ mod tests {
             "should have socket name matching code"
         );
         assert!(plist.contains("127.0.0.1"), "should bind to localhost only");
+        assert!(plist.contains("<string>run</string>"), "should have run subcommand");
         assert!(
             plist.contains("EnvironmentVariables"),
             "should have env vars (at least PATH)"
@@ -686,8 +688,8 @@ mod tests {
             "should have binary path"
         );
         assert!(
-            unit.contains("daemon --port 443"),
-            "should run daemon subcommand with port"
+            unit.contains("daemon run --port 443"),
+            "should run daemon run subcommand with port"
         );
         assert!(unit.contains("Type=simple"), "should have Type=simple");
         assert!(
@@ -700,7 +702,7 @@ mod tests {
     fn test_systemd_service_unit_custom_port() {
         let unit = generate_systemd_service_unit("/usr/local/bin/devproxy", 8443, None);
         assert!(
-            unit.contains("daemon --port 8443"),
+            unit.contains("daemon run --port 8443"),
             "should use custom port in ExecStart"
         );
     }

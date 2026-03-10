@@ -5,6 +5,8 @@ pub mod init;
 pub mod ls;
 pub mod open;
 pub mod restart;
+pub mod start;
 pub mod status;
+pub mod stop;
 pub mod up;
 pub mod update;

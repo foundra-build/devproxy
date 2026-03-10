@@ -179,5 +179,5 @@ devproxy --version   # version shown
 If everything passes, the setup is complete. Remind the user:
 - Add `.devproxy-override.yml` to `.gitignore` in each project
 - Use `devproxy up` / `devproxy down` to manage projects
-- Use `devproxy restart` to restart the daemon if needed
+- Use `devproxy daemon restart` to restart the daemon if needed
 - Use `devproxy update` to stay current

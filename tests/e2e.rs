@@ -152,7 +152,7 @@ impl Drop for DaemonGuard {
 /// Waits until the IPC socket is connectable.
 fn start_test_daemon(config_dir: &Path, port: u16) -> DaemonGuard {
     let child = Command::new(devproxy_bin())
-        .args(["daemon", "--port", &port.to_string()])
+        .args(["daemon", "run", "--port", &port.to_string()])
         .env("DEVPROXY_CONFIG_DIR", config_dir)
         .env("DEVPROXY_NO_SOCKET_ACTIVATION", "1")
         .stdout(Stdio::null())
@@ -237,13 +237,17 @@ fn test_cli_help() {
         stdout.contains("Check for updates") || stdout.contains("self-update"),
         "help should include update command description"
     );
-    // Daemon should be hidden as a top-level command (it may appear in descriptions)
-    // Check that "daemon" does not appear as a command entry (lines starting with "  daemon")
     assert!(
-        !stdout
-            .lines()
-            .any(|l| l.trim_start().starts_with("daemon ")),
-        "daemon command should be hidden from help"
+        stdout.contains("stop"),
+        "help should list the stop command"
+    );
+    assert!(
+        stdout.contains("start"),
+        "help should list the start command"
+    );
+    assert!(
+        stdout.contains("daemon"),
+        "help should list the daemon subcommand group"
     );
 }
 
@@ -348,9 +352,9 @@ fn test_status_without_daemon() {
 }
 
 #[test]
-fn test_restart_no_daemon() {
+fn test_daemon_restart_no_daemon() {
     // Without a platform-managed daemon (DEVPROXY_NO_SOCKET_ACTIVATION=1),
-    // restart should report that no daemon was found and exit non-zero.
+    // daemon restart should report that no daemon was found and exit non-zero.
     let config_dir =
         std::env::temp_dir().join(format!("devproxy-restart-nodaemon-{}", std::process::id()));
     std::fs::create_dir_all(&config_dir).unwrap();
@@ -361,15 +365,15 @@ fn test_restart_no_daemon() {
     .unwrap();
 
     let output = Command::new(devproxy_bin())
-        .args(["restart"])
+        .args(["daemon", "restart"])
         .env("DEVPROXY_CONFIG_DIR", &config_dir)
         .env("DEVPROXY_NO_SOCKET_ACTIVATION", "1")
         .output()
-        .expect("failed to run restart");
+        .expect("failed to run daemon restart");
 
     assert!(
         !output.status.success(),
-        "restart without a platform-managed daemon should exit non-zero"
+        "daemon restart without a platform-managed daemon should exit non-zero"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -381,24 +385,24 @@ fn test_restart_no_daemon() {
 }
 
 #[test]
-fn test_restart_running_daemon() {
+fn test_daemon_restart_running_daemon() {
     // Start a daemon with DEVPROXY_NO_SOCKET_ACTIVATION=1 (no launchd/systemd).
-    // `restart` should still report "no platform-managed daemon" because the
+    // `daemon restart` should still report "no platform-managed daemon" because the
     // daemon is running directly, not via launchd/systemd.
     let config_dir = create_test_config_dir("restart-running");
     let port = find_free_port();
     let _guard = start_test_daemon(&config_dir, port);
 
     let output = Command::new(devproxy_bin())
-        .args(["restart"])
+        .args(["daemon", "restart"])
         .env("DEVPROXY_CONFIG_DIR", &config_dir)
         .env("DEVPROXY_NO_SOCKET_ACTIVATION", "1")
         .output()
-        .expect("failed to run restart");
+        .expect("failed to run daemon restart");
 
     assert!(
         !output.status.success(),
-        "restart should exit non-zero when daemon is not platform-managed"
+        "daemon restart should exit non-zero when daemon is not platform-managed"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

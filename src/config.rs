@@ -327,6 +327,38 @@ pub fn compose_slug(random_slug: &str, app_name: &str) -> String {
         .to_string()
 }
 
+/// Validate a user-provided custom slug prefix.
+/// Unlike `sanitize_subdomain` which transforms input, this rejects invalid input.
+/// Rules: lowercase alphanumeric + hyphens, no leading/trailing hyphens, non-empty.
+pub fn validate_custom_slug(slug: &str) -> Result<()> {
+    if slug.is_empty() {
+        bail!("slug cannot be empty");
+    }
+    if slug.starts_with('-') || slug.ends_with('-') {
+        bail!("slug cannot start or end with a hyphen: '{slug}'");
+    }
+    if !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        bail!("slug must contain only lowercase letters, digits, and hyphens: '{slug}'");
+    }
+    Ok(())
+}
+
+/// Validate a custom slug and check the composite length with app name.
+/// Checks the raw `{slug}-{app_name}` length BEFORE truncation — custom slugs
+/// should be rejected when too long, not silently truncated (unlike random slugs
+/// where truncation is acceptable). See design spec: "validated and rejected if
+/// invalid (not sanitized/transformed like app names)."
+pub fn validate_custom_slug_with_app(slug: &str, app_name: &str) -> Result<()> {
+    validate_custom_slug(slug)?;
+    let raw_len = slug.len() + 1 + app_name.len(); // "{slug}-{app_name}"
+    if raw_len > 63 {
+        bail!(
+            "slug '{slug}' combined with app name '{app_name}' is {raw_len} chars (max 63)",
+        );
+    }
+    Ok(())
+}
+
 /// Find a free ephemeral port
 pub fn find_free_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -617,5 +649,44 @@ services:
     fn compose_slug_normal_lengths_not_truncated() {
         let result = compose_slug("bold-fox", "my-cool-app");
         assert_eq!(result, "bold-fox-my-cool-app");
+    }
+
+    #[test]
+    fn validate_custom_slug_accepts_valid() {
+        assert!(validate_custom_slug("dirty-panda").is_ok());
+        assert!(validate_custom_slug("my-app").is_ok());
+        assert!(validate_custom_slug("a").is_ok());
+        assert!(validate_custom_slug("abc123").is_ok());
+    }
+
+    #[test]
+    fn validate_custom_slug_rejects_empty() {
+        assert!(validate_custom_slug("").is_err());
+    }
+
+    #[test]
+    fn validate_custom_slug_rejects_uppercase() {
+        assert!(validate_custom_slug("Dirty-Panda").is_err());
+    }
+
+    #[test]
+    fn validate_custom_slug_rejects_special_chars() {
+        assert!(validate_custom_slug("dirty_panda").is_err());
+        assert!(validate_custom_slug("dirty.panda").is_err());
+        assert!(validate_custom_slug("dirty panda").is_err());
+    }
+
+    #[test]
+    fn validate_custom_slug_rejects_leading_trailing_hyphens() {
+        assert!(validate_custom_slug("-dirty").is_err());
+        assert!(validate_custom_slug("dirty-").is_err());
+        assert!(validate_custom_slug("-dirty-").is_err());
+    }
+
+    #[test]
+    fn validate_custom_slug_rejects_too_long_composite() {
+        // compose_slug joins as "{slug}-{app_name}" and must be <= 63
+        let long_slug = "a".repeat(60);
+        assert!(validate_custom_slug_with_app(&long_slug, "my-app").is_err());
     }
 }
