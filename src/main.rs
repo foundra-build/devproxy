@@ -25,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Ls => commands::ls::run().await,
         Commands::Open => commands::open::run().await,
         Commands::Status => commands::status::run().await,
+        Commands::Restart => commands::restart::run(),
         Commands::Update => commands::update::run().await,
         Commands::Daemon { port } => commands::daemon::run(port).await,
     }

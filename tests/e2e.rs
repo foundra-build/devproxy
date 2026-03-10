@@ -221,6 +221,10 @@ fn test_cli_help() {
     assert!(stdout.contains("ls"));
     assert!(stdout.contains("status"));
     assert!(
+        stdout.contains("restart"),
+        "help should list the restart command"
+    );
+    assert!(
         stdout.contains("update"),
         "help should list the update command"
     );
@@ -336,6 +340,66 @@ fn test_status_without_daemon() {
     );
 
     let _ = std::fs::remove_dir_all(&config_dir);
+}
+
+#[test]
+fn test_restart_no_daemon() {
+    // Without a platform-managed daemon (DEVPROXY_NO_SOCKET_ACTIVATION=1),
+    // restart should report that no daemon was found and exit non-zero.
+    let config_dir =
+        std::env::temp_dir().join(format!("devproxy-restart-nodaemon-{}", std::process::id()));
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.json"),
+        format!(r#"{{"domain":"{TEST_DOMAIN}"}}"#),
+    )
+    .unwrap();
+
+    let output = Command::new(devproxy_bin())
+        .args(["restart"])
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .env("DEVPROXY_NO_SOCKET_ACTIVATION", "1")
+        .output()
+        .expect("failed to run restart");
+
+    assert!(
+        !output.status.success(),
+        "restart without a platform-managed daemon should exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no platform-managed daemon found"),
+        "should report no daemon found: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&config_dir);
+}
+
+#[test]
+fn test_restart_running_daemon() {
+    // Start a daemon with DEVPROXY_NO_SOCKET_ACTIVATION=1 (no launchd/systemd).
+    // `restart` should still report "no platform-managed daemon" because the
+    // daemon is running directly, not via launchd/systemd.
+    let config_dir = create_test_config_dir("restart-running");
+    let port = find_free_port();
+    let _guard = start_test_daemon(&config_dir, port);
+
+    let output = Command::new(devproxy_bin())
+        .args(["restart"])
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .env("DEVPROXY_NO_SOCKET_ACTIVATION", "1")
+        .output()
+        .expect("failed to run restart");
+
+    assert!(
+        !output.status.success(),
+        "restart should exit non-zero when daemon is not platform-managed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no platform-managed daemon found"),
+        "should report no platform-managed daemon: {stderr}"
+    );
 }
 
 #[test]
