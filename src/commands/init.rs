@@ -367,16 +367,16 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         eprintln!("{} CA certificate generated", "ok:".green());
 
         // Trust the CA
-        eprintln!("trusting CA in system keychain (requires sudo)...");
+        eprintln!("trusting CA in login keychain...");
         match cert::trust_ca_in_system(&ca_cert_path) {
-            Ok(()) => eprintln!("{} CA trusted in system keychain", "ok:".green()),
+            Ok(()) => eprintln!("{} CA trusted in login keychain", "ok:".green()),
             Err(e) => {
                 ca_trust_needed = true;
                 eprintln!("{} could not trust CA automatically: {e}", "warn:".yellow());
-                eprintln!("  run manually with sudo:");
+                eprintln!("  run manually:");
                 #[cfg(target_os = "macos")]
                 eprintln!(
-                    "    sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+                    "    security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db {}",
                     ca_cert_path.display()
                 );
                 #[cfg(target_os = "linux")]
@@ -553,7 +553,7 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         );
         #[cfg(target_os = "macos")]
         eprintln!(
-            "     sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+            "     security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db {}",
             ca_cert_path.display()
         );
         #[cfg(target_os = "linux")]
