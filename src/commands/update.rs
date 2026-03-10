@@ -136,12 +136,13 @@ fn download_file(url: &str, dest: &Path) -> Result<()> {
 }
 
 /// Set permissions and codesign the binary at `path`.
-fn prepare_binary(path: &Path) -> Result<()> {
+/// Used by both update (for downloaded binaries) and init (for the daemon binary copy).
+pub(crate) fn prepare_binary(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .context("failed to set permissions on downloaded binary")?;
+            .context("failed to set binary permissions")?;
     }
 
     #[cfg(target_os = "macos")]
@@ -319,6 +320,13 @@ fn do_update(download_url: &str, exe_path: &Path, tmpfile: &Path) -> Result<()> 
     }
 
     replace_binary(tmpfile, exe_path)?;
+
+    // Also update the dedicated daemon binary so that the launchd/systemd
+    // managed daemon picks up the new version on restart.
+    let daemon_bin = crate::config::Config::daemon_binary_path()?;
+    if daemon_bin.exists() {
+        super::init::install_daemon_binary(exe_path, &daemon_bin)?;
+    }
 
     Ok(())
 }

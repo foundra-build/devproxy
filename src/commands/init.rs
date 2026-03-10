@@ -45,7 +45,7 @@ pub fn is_devproxy_process(pid: i32) -> bool {
                 comm.trim()
                     .rsplit('/')
                     .next()
-                    .map(|name| name == "devproxy")
+                    .map(|name| name == "devproxy" || name == "devproxy-daemon")
                     .unwrap_or(false)
             }
             _ => false,
@@ -56,7 +56,7 @@ pub fn is_devproxy_process(pid: i32) -> bool {
         // On Linux, read /proc/<pid>/exe symlink.
         let exe = std::fs::read_link(format!("/proc/{pid}/exe"));
         match exe {
-            Ok(path) => path.file_name().map(|n| n == "devproxy").unwrap_or(false),
+            Ok(path) => path.file_name().map(|n| n == "devproxy" || n == "devproxy-daemon").unwrap_or(false),
             Err(_) => false,
         }
     }
@@ -315,6 +315,23 @@ fn spawn_daemon_directly(exe: &std::path::Path, port: u16, domain: &str) -> Resu
     Ok(())
 }
 
+/// Copy the current binary to the dedicated daemon binary path.
+/// Creates the parent directory if needed, then delegates to
+/// `update::prepare_binary` for permissions and codesigning.
+pub fn install_daemon_binary(src: &std::path::Path, dest: &std::path::Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
+    std::fs::copy(src, dest)
+        .with_context(|| format!("could not copy binary to {}", dest.display()))?;
+
+    super::update::prepare_binary(dest)?;
+
+    eprintln!("{} daemon binary installed at {}", "ok:".green(), dest.display());
+    Ok(())
+}
+
 pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
     validate_domain(domain)?;
     let config = Config {
@@ -410,6 +427,12 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         eprintln!("starting daemon on port {port}...");
         let exe = std::env::current_exe().context("could not determine binary path")?;
 
+        // Copy the current binary to a dedicated daemon path so that
+        // launchd's KeepAlive monitoring of the daemon binary does not
+        // SIGKILL normal CLI invocations at the main binary path.
+        let daemon_bin = Config::daemon_binary_path()?;
+        install_daemon_binary(&exe, &daemon_bin)?;
+
         // Try platform-specific socket activation (launchd on macOS,
         // systemd on Linux). The daemon receives pre-bound sockets from
         // the OS, so it runs as the current user — no sudo needed for
@@ -421,7 +444,7 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         // Pass DEVPROXY_CONFIG_DIR if set — the plist/unit file must
         // embed it so the daemon uses the correct config directory.
         let config_dir_override = std::env::var("DEVPROXY_CONFIG_DIR").ok();
-        match crate::platform::install_daemon(&exe, port, config_dir_override.as_deref()) {
+        match crate::platform::install_daemon(&daemon_bin, port, config_dir_override.as_deref()) {
             Ok(()) => {
                 // Wait for daemon to become responsive (socket activation
                 // startup may be slower than direct spawn)
@@ -468,7 +491,7 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         }
 
         if !activated {
-            spawn_daemon_directly(&exe, port, domain)?;
+            spawn_daemon_directly(&daemon_bin, port, domain)?;
         }
     }
 

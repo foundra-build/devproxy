@@ -1201,6 +1201,14 @@ fn test_launchd_socket_activation() {
             plist_content.contains(&daemon_port.to_string()),
             "plist should contain port {daemon_port}"
         );
+
+        // Verify the plist references the daemon binary path (not the CLI binary)
+        assert!(
+            plist_content.contains("devproxy-daemon"),
+            "plist should reference the dedicated daemon binary (devproxy-daemon), \
+             not the CLI binary. This prevents launchd KeepAlive from SIGKILL'ing \
+             normal CLI invocations."
+        );
     }
 
     // Cleanup: bootout the agent and remove plist
@@ -1234,4 +1242,193 @@ fn test_launchd_socket_activation() {
     }
 
     let _ = std::fs::remove_dir_all(&config_dir);
+}
+
+/// Verify that `devproxy --version` works even when a daemon is running.
+///
+/// This is the core regression test for the launchd SIGKILL bug: launchd's
+/// KeepAlive=true causes it to SIGKILL any non-managed process at the
+/// managed binary path. By using a separate daemon binary path, the CLI
+/// binary is free from launchd interference.
+///
+/// This test verifies the structural fix: init installs a daemon binary at
+/// a separate path, and --version runs cleanly from the CLI binary.
+#[test]
+#[ignore] // Run with: cargo test --test e2e -- --ignored test_version_works_with_daemon_running
+fn test_version_works_with_daemon_running() {
+    let config_dir = create_test_config_dir("ver-daemon");
+    let port = find_free_port();
+
+    // Start a daemon in the background. The daemon needs TLS certs which
+    // create_test_config_dir already generates via `init --no-daemon`.
+    let _guard = start_test_daemon(&config_dir, port);
+
+    // Run --version — this must succeed even while a daemon is running.
+    // In the launchd SIGKILL bug, running the binary at the launchd-managed
+    // path would get killed. With the daemon binary path separation fix,
+    // the CLI binary path is not managed by launchd.
+    let output = Command::new(devproxy_bin())
+        .args(["--version"])
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .env("DEVPROXY_NO_SOCKET_ACTIVATION", "1")
+        .output()
+        .expect("failed to run devproxy --version");
+
+    assert!(
+        output.status.success(),
+        "devproxy --version should succeed (exit {}): stderr={}",
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("devproxy"),
+        "--version should print version info: {stdout}"
+    );
+}
+
+/// Verify that init with daemon installs the daemon binary at the
+/// DEVPROXY_DATA_DIR path and that the daemon binary path differs
+/// from the CLI binary path.
+#[test]
+fn test_init_daemon_binary_path_separation() {
+    let config_dir = std::env::temp_dir().join(format!(
+        "devproxy-config-path-sep-{}",
+        std::process::id()
+    ));
+    let data_dir = std::env::temp_dir().join(format!(
+        "devproxy-data-path-sep-{}",
+        std::process::id()
+    ));
+    if config_dir.exists() {
+        std::fs::remove_dir_all(&config_dir).unwrap();
+    }
+    if data_dir.exists() {
+        std::fs::remove_dir_all(&data_dir).unwrap();
+    }
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let port = find_free_port();
+
+    // Run init with daemon (uses fallback spawn since DEVPROXY_NO_SOCKET_ACTIVATION=1)
+    let output = Command::new(devproxy_bin())
+        .args([
+            "init",
+            "--domain",
+            TEST_DOMAIN,
+            "--port",
+            &port.to_string(),
+        ])
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .env("DEVPROXY_DATA_DIR", &data_dir)
+        .env("DEVPROXY_NO_SOCKET_ACTIVATION", "1")
+        .output()
+        .expect("failed to run devproxy init");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("init stderr: {stderr}");
+
+    assert!(
+        output.status.success(),
+        "init should succeed: {stderr}"
+    );
+
+    // Verify daemon binary was installed at the data dir path
+    let daemon_bin = data_dir.join("devproxy-daemon");
+    assert!(
+        daemon_bin.exists(),
+        "daemon binary should be installed at {}: {stderr}",
+        daemon_bin.display()
+    );
+
+    // Verify daemon binary path is different from CLI binary path
+    let cli_bin = devproxy_bin();
+    assert_ne!(
+        cli_bin, daemon_bin,
+        "daemon binary path should differ from CLI binary path"
+    );
+
+    // Verify --version works from CLI binary while daemon is running
+    let version_output = Command::new(&cli_bin)
+        .args(["--version"])
+        .env("DEVPROXY_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("failed to run --version");
+
+    assert!(
+        version_output.status.success(),
+        "--version should succeed while daemon is running (exit {}): {}",
+        version_output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&version_output.stderr)
+    );
+
+    // Clean up daemon
+    let pid_path = config_dir.join("daemon.pid");
+    if pid_path.exists() {
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&config_dir);
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// Verify that the daemon binary at the data dir path can run --version
+/// and produce the same output as the CLI binary.
+#[test]
+fn test_daemon_binary_matches_cli_binary() {
+    let data_dir = std::env::temp_dir().join(format!(
+        "devproxy-data-match-{}",
+        std::process::id()
+    ));
+    if data_dir.exists() {
+        std::fs::remove_dir_all(&data_dir).unwrap();
+    }
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let cli_bin = devproxy_bin();
+    let daemon_bin = data_dir.join("devproxy-daemon");
+
+    // Copy CLI binary to daemon path (simulating what init does)
+    std::fs::copy(&cli_bin, &daemon_bin).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&daemon_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let cli_output = Command::new(&cli_bin)
+        .args(["--version"])
+        .output()
+        .expect("CLI --version failed");
+    let daemon_output = Command::new(&daemon_bin)
+        .args(["--version"])
+        .output()
+        .expect("daemon --version failed");
+
+    assert!(cli_output.status.success(), "CLI --version should succeed");
+    assert!(
+        daemon_output.status.success(),
+        "daemon binary --version should succeed"
+    );
+
+    let cli_version = String::from_utf8_lossy(&cli_output.stdout);
+    let daemon_version = String::from_utf8_lossy(&daemon_output.stdout);
+    assert_eq!(
+        cli_version, daemon_version,
+        "CLI and daemon binaries should report the same version"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
 }
