@@ -35,14 +35,14 @@ Key differences from the current code:
 
 **Why `login.keychain-db`:** Modern macOS (10.12+) uses the `-db` suffix. The `security` command accepts both `login.keychain` and `login.keychain-db`, but using the actual filename is more robust. We resolve the full path via `$HOME/Library/Keychains/login.keychain-db`.
 
-**Why keep the function name `trust_ca_in_system`:** On Linux, this function still targets system-level CA trust (`/usr/local/share/ca-certificates`). Renaming to something like `trust_ca` is tempting but would touch more code for no functional benefit. The doc comment already describes per-platform behavior. Keep the name as-is.
+**Why keep the function name `trust_ca_in_system`:** On Linux, this function still targets system-level CA trust (`/usr/local/share/ca-certificates`). Renaming would touch more code for no functional benefit. The doc comment will be updated to describe the per-platform behavior accurately.
 
 ## Scope of User-Facing Message Changes in init.rs
 
 There are **five** places in `src/commands/init.rs` that reference the system keychain or sudo for macOS trust:
 1. Line 363: `"trusting CA in system keychain (requires sudo)..."` — change to `"trusting CA in login keychain..."`
 2. Line 365: `"CA trusted in system keychain"` — change to `"CA trusted in login keychain"`
-3. Line 369: `"run manually with sudo:"` — change to platform-conditional message (macOS no longer needs sudo; Linux still does)
+3. Line 369: `"run manually with sudo:"` — change to `"run manually:"` (the Linux fallback command includes `sudo` inline; the macOS command no longer needs it)
 4. Line 372: fallback manual command with `sudo security add-trusted-cert ... /Library/Keychains/System.keychain` — update to new command (no sudo)
 5. Line 548-549: "Next steps" fallback with same manual command — update to new command (no sudo)
 
@@ -50,27 +50,14 @@ All five must be updated consistently.
 
 ---
 
-### Task 1: Add `login_keychain_path` helper and test in cert.rs
+### Task 1: Add `login_keychain_path` helper with TDD in cert.rs
 
 **Files:**
 - Modify: `src/proxy/cert.rs`
 
-**Step 1: Add the helper function**
+**Step 1: Write the failing test**
 
-Add just above the existing `trust_ca_in_system` function (before line 135):
-
-```rust
-/// Return the path to the current user's login keychain on macOS.
-#[cfg(target_os = "macos")]
-fn login_keychain_path() -> Result<std::path::PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join("Library/Keychains/login.keychain-db"))
-}
-```
-
-**Step 2: Add a unit test**
-
-Add to the existing `#[cfg(test)] mod tests` block at the end of the file:
+Add to the existing `#[cfg(test)] mod tests` block at the end of `src/proxy/cert.rs`:
 
 ```rust
 #[cfg(target_os = "macos")]
@@ -82,15 +69,36 @@ fn login_keychain_path_points_to_login_keychain() {
 }
 ```
 
-**Step 3: Run the test**
+**Step 2: Run the test to verify it fails**
 
 ```bash
 cargo test --lib -- cert::tests::login_keychain_path
 ```
 
-Expected: PASS (on macOS).
+Expected: FAIL — compile error because `login_keychain_path` does not exist yet.
 
-**Step 4: Commit**
+**Step 3: Add the helper function**
+
+Add just above the existing `trust_ca_in_system` function (before line 135 in `src/proxy/cert.rs`):
+
+```rust
+/// Return the path to the current user's login keychain on macOS.
+#[cfg(target_os = "macos")]
+fn login_keychain_path() -> Result<std::path::PathBuf> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join("Library/Keychains/login.keychain-db"))
+}
+```
+
+**Step 4: Run the test to verify it passes**
+
+```bash
+cargo test --lib -- cert::tests::login_keychain_path
+```
+
+Expected: PASS.
+
+**Step 5: Commit**
 
 ```bash
 git add src/proxy/cert.rs
@@ -104,9 +112,30 @@ git commit -m "feat: add login_keychain_path helper for macOS CA trust"
 **Files:**
 - Modify: `src/proxy/cert.rs`
 
-**Step 1: Replace the macOS block in trust_ca_in_system**
+**Step 1: Update the doc comment on `trust_ca_in_system`**
 
-Replace lines 140-160 (the `#[cfg(target_os = "macos")]` block inside `trust_ca_in_system`) with:
+Replace the doc comment block (lines 135-138 of `src/proxy/cert.rs`):
+
+```rust
+/// Trust the CA certificate in the system keychain.
+///
+/// Supports macOS (security add-trusted-cert) and Linux (update-ca-certificates).
+/// Warns on other platforms where automatic trust is not implemented.
+```
+
+With:
+
+```rust
+/// Trust the CA certificate in the OS certificate store.
+///
+/// On macOS, adds to the user's login keychain (no sudo required).
+/// On Linux, copies to /usr/local/share/ca-certificates and runs update-ca-certificates.
+/// Warns on other platforms where automatic trust is not implemented.
+```
+
+**Step 2: Replace the macOS block in `trust_ca_in_system`**
+
+Replace the `#[cfg(target_os = "macos")]` block inside `trust_ca_in_system` (the block starting at line 140 with `#[cfg(target_os = "macos")]` and ending at line 160 with `return Ok(());` and `}`) with:
 
 ```rust
 #[cfg(target_os = "macos")]
@@ -140,7 +169,7 @@ Changes from current code:
 - Changed keychain from `/Library/Keychains/System.keychain` to dynamic login keychain path
 - Updated error message (no more "may need sudo")
 
-**Step 2: Verify compilation and existing tests still pass**
+**Step 3: Verify compilation and existing tests still pass**
 
 ```bash
 cargo test --lib -- cert::tests
@@ -148,7 +177,7 @@ cargo test --lib -- cert::tests
 
 Expected: all cert tests pass.
 
-**Step 3: Commit**
+**Step 4: Commit**
 
 ```bash
 git add src/proxy/cert.rs
