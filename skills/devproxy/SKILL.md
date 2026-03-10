@@ -1,6 +1,6 @@
 ---
 name: devproxy
-description: This skill should be used when the user mentions "devproxy", "dev subdomain", "local HTTPS proxy", asks about HTTPS for Docker Compose, wants to route Docker services through HTTPS subdomains, needs to troubleshoot devproxy issues like certificate errors or daemon problems, or asks about devproxy commands like "devproxy up", "devproxy down", "devproxy ls", "devproxy status", "devproxy init", "devproxy open", or "devproxy update".
+description: This skill should be used when the user mentions "devproxy", "dev subdomain", "local HTTPS proxy", asks about HTTPS for Docker Compose, wants to route Docker services through HTTPS subdomains, needs to troubleshoot devproxy issues like certificate errors or daemon problems, or asks about devproxy commands like "devproxy up", "devproxy down", "devproxy ls", "devproxy status", "devproxy init", "devproxy open", "devproxy restart", or "devproxy update".
 ---
 
 # devproxy
@@ -20,6 +20,7 @@ Local HTTPS dev subdomains for Docker Compose projects. Single Rust binary — n
 | `devproxy ls`                    | List running projects with slugs and URLs       |
 | `devproxy get-url`               | Print this project's proxy URL (for scripting)  |
 | `devproxy open`                  | Open this project's URL in browser              |
+| `devproxy restart`               | Restart the daemon                              |
 | `devproxy update`                | Check for updates and self-update the binary    |
 | `devproxy --version`             | Show installed version                          |
 | `devproxy status`                | Daemon health + active route count              |
@@ -74,14 +75,15 @@ curl --resolve <slug>.<domain>:443:127.0.0.1 https://<slug>.<domain>
 
 - **macOS**: `devproxy init` installs a LaunchAgent plist. launchd binds port 443 and passes the socket fd to the daemon running as the current user (no sudo).
 - **Linux**: Uses systemd user socket activation. Falls back to `setcap cap_net_bind_service` if systemd is unavailable.
-- `devproxy update` replaces the binary and restarts the daemon via `launchctl kickstart -k` (macOS) or `systemctl --user restart` (Linux).
+- `devproxy restart` restarts the daemon via `launchctl kickstart -k` (macOS) or `systemctl --user restart` (Linux).
+- `devproxy update` replaces the binary and restarts the daemon.
 - `sudo` is only needed for one-time DNS setup and CA trust — never for daemon startup.
 
 ## Common Issues
 
 | Problem | Fix |
 |---------|-----|
-| "Connection refused" on HTTPS | Check daemon: `devproxy status`. Restart with `devproxy init` |
+| "Connection refused" on HTTPS | Check daemon: `devproxy status`. Restart with `devproxy restart` or re-init with `devproxy init` |
 | Port 443 requires sudo (Linux) | Normally handled by systemd socket activation. Fallback: `sudo setcap cap_net_bind_service=+ep $(which devproxy)` or use `devproxy init --port 8443` |
 | DNS not resolving `*.mysite.dev` | Add `127.0.0.1 slug.mysite.dev` to `/etc/hosts` or configure dnsmasq |
 | `curl` fails but browser works (macOS) | `curl` doesn't use `/etc/resolver/`. Use `curl --resolve <slug>.<domain>:443:127.0.0.1 https://<slug>.<domain>` |

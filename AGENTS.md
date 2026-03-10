@@ -56,6 +56,16 @@ tests/
 └── linux-docker/    — Docker-based Linux e2e tests (systemd, setcap, LISTEN_FDS)
 ```
 
+## Plugin & Skills Sync
+
+When adding, removing, or renaming CLI commands, **always** update the following to stay in sync:
+
+1. **`skills/devproxy/SKILL.md`** — command table, trigger description, and any references
+2. **`skills/setup/SKILL.md`** — if the command is relevant to setup/onboarding
+3. **`.claude-plugin/plugin.json`** — bump version to match `Cargo.toml`
+
+Do not consider a CLI change complete until the plugin/skills reflect it.
+
 ## Dependencies
 
 See `Cargo.toml`. Key crates: clap, tokio, hyper, tokio-rustls, rcgen, serde, anyhow.
