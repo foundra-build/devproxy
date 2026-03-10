@@ -117,13 +117,16 @@ pub fn validate_custom_slug(slug: &str) -> Result<()> {
 }
 
 /// Validate a custom slug and check the composite length with app name.
+/// Checks the raw `{slug}-{app_name}` length BEFORE truncation — custom slugs
+/// should be rejected when too long, not silently truncated (unlike random slugs
+/// where truncation is acceptable). See design spec: "validated and rejected if
+/// invalid (not sanitized/transformed like app names)."
 pub fn validate_custom_slug_with_app(slug: &str, app_name: &str) -> Result<()> {
     validate_custom_slug(slug)?;
-    let composite = compose_slug(slug, app_name);
-    if composite.len() > 63 {
+    let raw_len = slug.len() + 1 + app_name.len(); // "{slug}-{app_name}"
+    if raw_len > 63 {
         bail!(
-            "slug '{slug}' combined with app name '{app_name}' is {} chars (max 63)",
-            format!("{slug}-{app_name}").len()
+            "slug '{slug}' combined with app name '{app_name}' is {raw_len} chars (max 63)",
         );
     }
     Ok(())
