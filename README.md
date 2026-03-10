@@ -13,7 +13,10 @@ services:
 
 ```bash
 devproxy up
-# → https://swift-penguin.mysite.dev
+# → https://swift-penguin-myapp.mysite.dev
+
+devproxy up --slug my-app
+# → https://my-app-myapp.mysite.dev
 ```
 
 ## Features
@@ -49,16 +52,21 @@ devproxy up
 
 ## Commands
 
-| Command              | Description                                  |
-|----------------------|----------------------------------------------|
-| `devproxy init`      | One-time setup: certs, CA trust, daemon      |
-| `devproxy up`        | Start project, assign slug, proxy it         |
-| `devproxy down`      | Stop project, clean up override              |
-| `devproxy ls`        | List running projects with URLs              |
-| `devproxy open`      | Open project URL in browser                  |
-| `devproxy status`    | Daemon health check                          |
-| `devproxy update`    | Check for updates and self-update            |
-| `devproxy --version` | Show installed version                       |
+| Command              | Description                                       |
+|----------------------|---------------------------------------------------|
+| `devproxy init`      | One-time setup: certs, CA trust, daemon            |
+| `devproxy up`        | Start project, assign slug, proxy it               |
+| `devproxy up --slug` | Start project with a custom slug prefix            |
+| `devproxy down`      | Stop project, remove override and slug             |
+| `devproxy stop`      | Stop containers (preserves slug for restart)       |
+| `devproxy start`     | Start previously stopped containers                |
+| `devproxy restart`   | Restart app containers                             |
+| `devproxy ls`        | List running projects with URLs                    |
+| `devproxy open`      | Open project URL in browser                        |
+| `devproxy status`    | Daemon health check                                |
+| `devproxy daemon restart` | Restart the background daemon               |
+| `devproxy update`    | Check for updates and self-update                  |
+| `devproxy --version` | Show installed version                             |
 
 ## Claude Code Plugin
 

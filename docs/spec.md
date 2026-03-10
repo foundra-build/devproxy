@@ -196,6 +196,6 @@ No Caddy. No Traefik. No mkcert. No external proxy process.
   Could support `devproxy.port=3000,devproxy.name=api` to allow multiple routes per project.
 - **HTTP → HTTPS redirect**: daemon currently only listens on :443. Add an :80 listener that
   301-redirects to HTTPS.
-- **Slug persistence**: slugs are stable for the lifetime of a running container but reset on
+- ~~**Slug persistence**: slugs are stable for the lifetime of a running container but reset on
   `devproxy up`. Could offer `devproxy pin <slug>` to write the slug into a `.devproxy` file
-  so the same slug is always used for a given project.
+  so the same slug is always used for a given project.~~ **Done** — `devproxy up --slug NAME` allows predictable slugs. `devproxy stop`/`start` preserves the slug across stop/start cycles without regenerating.

@@ -248,7 +248,7 @@ fn spawn_daemon_directly(exe: &std::path::Path, port: u16, domain: &str) -> Resu
     }
 
     let mut cmd = std::process::Command::new(exe);
-    cmd.args(["daemon", "--port", &port.to_string()]);
+    cmd.args(["daemon", "run", "--port", &port.to_string()]);
 
     if let Ok(dir) = std::env::var("DEVPROXY_CONFIG_DIR") {
         cmd.env("DEVPROXY_CONFIG_DIR", dir);

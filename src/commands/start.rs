@@ -17,7 +17,7 @@ pub fn run() -> Result<()> {
         bail!("override file missing. Run `devproxy up` to reconfigure.");
     }
 
-    // Verify daemon is running (same checks as start, per spec)
+    // Verify daemon is running
     let socket_path = Config::socket_path()?;
     if !socket_path.exists()
         || !crate::ipc::ping_sync(&socket_path, std::time::Duration::from_secs(2))
@@ -40,14 +40,14 @@ pub fn run() -> Result<()> {
             ".devproxy-override.yml",
             "--project-name",
             &slug,
-            "restart",
+            "start",
         ])
         .current_dir(compose_dir)
         .status()
-        .context("failed to run docker compose restart")?;
+        .context("failed to run docker compose start")?;
 
     if !status.success() {
-        bail!("docker compose restart failed");
+        bail!("docker compose start failed");
     }
 
     let config = Config::load().context("run `devproxy init` first")?;

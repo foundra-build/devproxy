@@ -3,11 +3,9 @@ use crate::slugs;
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
-pub fn run() -> Result<()> {
-    // Check config exists (implies init was run)
+pub fn run(custom_slug: Option<&str>) -> Result<()> {
     let config = Config::load().context("run `devproxy init` first")?;
 
-    // Find docker-compose.yml (shared utility from config module)
     let cwd = std::env::current_dir()?;
     let compose_path = config::find_compose_file(&cwd)?;
     let compose_dir = compose_path
@@ -19,7 +17,6 @@ pub fn run() -> Result<()> {
         compose_path.display().to_string().cyan()
     );
 
-    // Parse compose file
     let compose = config::parse_compose_file(&compose_path)?;
     let (service_name, container_port) = config::find_devproxy_service(&compose)?;
     eprintln!(
@@ -28,44 +25,68 @@ pub fn run() -> Result<()> {
         container_port.to_string().cyan()
     );
 
-    // Detect app name and generate composite slug
-    let app_name = config::detect_app_name(&cwd)?;
-    eprintln!("app: {}", app_name.cyan());
+    // Check for existing project state (reuse if present)
+    let project_path = compose_dir.join(".devproxy-project");
+    let override_path = compose_dir.join(".devproxy-override.yml");
+    let reusing = project_path.exists() && override_path.exists();
 
-    let random_slug = slugs::generate_slug();
-    let slug = config::compose_slug(&random_slug, &app_name);
-    eprintln!("slug: {}", slug.cyan());
+    let slug = if reusing {
+        let existing_slug = config::read_project_file(compose_dir)?;
+        if custom_slug.is_some() {
+            eprintln!(
+                "{} ignoring --slug, reusing existing slug. Run `devproxy down` first to change slug.",
+                "warn:".yellow()
+            );
+        }
+        eprintln!("slug: {} (reusing)", existing_slug.cyan());
+        existing_slug
+    } else {
+        let app_name = config::detect_app_name(&cwd)?;
+        eprintln!("app: {}", app_name.cyan());
 
-    // Find free port
-    let host_port = config::find_free_port()?;
-    eprintln!("host port: {}", host_port.to_string().cyan());
+        let slug_prefix = match custom_slug {
+            Some(s) => {
+                config::validate_custom_slug_with_app(s, &app_name)?;
+                s.to_string()
+            }
+            None => slugs::generate_slug(),
+        };
+        let slug = config::compose_slug(&slug_prefix, &app_name);
+        eprintln!("slug: {}", slug.cyan());
 
-    // Write override file (port binding)
-    let override_path =
+        let host_port = config::find_free_port()?;
+        eprintln!("host port: {}", host_port.to_string().cyan());
+
         config::write_override_file(compose_dir, &service_name, host_port, container_port)?;
-    eprintln!("override: {}", override_path.display().to_string().cyan());
+        eprintln!(
+            "override: {}",
+            override_path.display().to_string().cyan()
+        );
 
-    // Write project file (slug tracking -- used by `down` and `open`)
-    config::write_project_file(compose_dir, &slug)?;
+        config::write_project_file(compose_dir, &slug)?;
+        slug
+    };
 
-    // Verify daemon is running before starting containers.
-    // Use a short timeout (2s) so we fail fast instead of hanging forever.
+    // Verify daemon is running.
+    // On the !reusing path, clean up freshly-written files on failure.
+    // On the reusing path, files pre-existed so leave them alone.
     let socket_path = Config::socket_path()?;
     if !socket_path.exists() {
-        // Clean up files we already wrote
-        let _ = std::fs::remove_file(&override_path);
-        let _ = std::fs::remove_file(compose_dir.join(".devproxy-project"));
+        if !reusing {
+            let _ = std::fs::remove_file(&override_path);
+            let _ = std::fs::remove_file(&project_path);
+        }
         bail!(
             "daemon is not running (no socket at {}). Run `devproxy init` first.",
             socket_path.display()
         );
     }
 
-    // Send an actual IPC ping with a 2s timeout to verify the daemon is
-    // responsive, not just that a stale socket file exists.
     if !crate::ipc::ping_sync(&socket_path, std::time::Duration::from_secs(2)) {
-        let _ = std::fs::remove_file(&override_path);
-        let _ = std::fs::remove_file(compose_dir.join(".devproxy-project"));
+        if !reusing {
+            let _ = std::fs::remove_file(&override_path);
+            let _ = std::fs::remove_file(&project_path);
+        }
         bail!(
             "daemon is not running (no response from {}). Run `devproxy init` first.",
             socket_path.display()
@@ -95,9 +116,11 @@ pub fn run() -> Result<()> {
         .context("failed to run docker compose")?;
 
     if !status.success() {
-        // Clean up on failure
-        let _ = std::fs::remove_file(&override_path);
-        let _ = std::fs::remove_file(compose_dir.join(".devproxy-project"));
+        // Only clean up files we just created (not reused ones)
+        if !reusing {
+            let _ = std::fs::remove_file(&override_path);
+            let _ = std::fs::remove_file(&project_path);
+        }
         bail!("docker compose up failed");
     }
 
