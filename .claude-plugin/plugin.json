@@ -1,6 +1,6 @@
 {
   "name": "devproxy",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Claude Code plugin for setting up and using devproxy — local HTTPS dev subdomains for Docker Compose projects",
   "author": {
     "name": "Foundra",
