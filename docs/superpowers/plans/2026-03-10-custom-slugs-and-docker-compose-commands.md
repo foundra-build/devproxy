@@ -24,12 +24,12 @@ The current `up.rs` checks the daemon AFTER writing override/project files and c
 
 The e2e tests have several references to the old CLI structure that must be updated:
 - `start_test_daemon()` calls `["daemon", "--port", ...]` — must become `["daemon", "run", "--port", ...]`
-- `test_restart_no_daemon` and `test_restart_running_daemon` test `devproxy restart` for daemon restart behavior — must be updated to test `devproxy daemon restart`
+- `test_restart_no_daemon` and `test_restart_running_daemon` test `devproxy restart` for daemon restart behavior — must be updated to test `devproxy daemon restart` and renamed to `test_daemon_restart_*` for clarity
 - `test_cli_help` asserts `daemon` is hidden from help — must be updated since `daemon` is now a visible subcommand group (only `daemon run` is hidden)
 
-### D3: `restart` e2e tests — rewrite vs. remove
+### D3: `restart` e2e tests — rewrite, rename, and clarify
 
-The two daemon restart e2e tests (`test_restart_no_daemon`, `test_restart_running_daemon`) test that `devproxy restart` reports "no platform-managed daemon found" when `DEVPROXY_NO_SOCKET_ACTIVATION=1`. After restructuring, these should test `devproxy daemon restart` instead. The behavior is identical — just the command path changes. Additionally, `devproxy restart` (now app-stack restart) will fail in these tests because there's no compose project, but that's a different error. We rewrite the tests to target `daemon restart`.
+The two daemon restart e2e tests (`test_restart_no_daemon`, `test_restart_running_daemon`) test that `devproxy restart` reports "no platform-managed daemon found" when `DEVPROXY_NO_SOCKET_ACTIVATION=1`. After restructuring, these should test `devproxy daemon restart` instead. The behavior is identical — just the command path changes. Additionally, `devproxy restart` (now app-stack restart) will fail in these tests because there's no compose project, but that's a different error. We rewrite the tests to target `daemon restart` and rename them to `test_daemon_restart_no_daemon` / `test_daemon_restart_running_daemon` so it's unambiguous which command they test.
 
 ### D4: Version bump rationale
 
@@ -977,9 +977,17 @@ assert!(
 // );
 ```
 
-- [ ] **Step 3: Update daemon restart e2e tests**
+- [ ] **Step 3: Rename and update daemon restart e2e tests**
 
-In `test_restart_no_daemon` (~line 351-381), change:
+Rename `test_restart_no_daemon` to `test_daemon_restart_no_daemon` and update the command args. In `tests/e2e.rs` (~line 350-381):
+
+```rust
+// Rename: fn test_restart_no_daemon() -> fn test_daemon_restart_no_daemon()
+#[test]
+fn test_daemon_restart_no_daemon() {
+```
+
+Change:
 ```rust
 .args(["restart"])
 ```
@@ -988,7 +996,15 @@ To:
 .args(["daemon", "restart"])
 ```
 
-In `test_restart_running_daemon` (~line 383-408), change:
+Similarly, rename `test_restart_running_daemon` to `test_daemon_restart_running_daemon` (~line 383-408):
+
+```rust
+// Rename: fn test_restart_running_daemon() -> fn test_daemon_restart_running_daemon()
+#[test]
+fn test_daemon_restart_running_daemon() {
+```
+
+Change:
 ```rust
 .args(["restart"])
 ```
@@ -997,13 +1013,13 @@ To:
 .args(["daemon", "restart"])
 ```
 
-The assertion strings ("no platform-managed daemon found") remain the same since the daemon restart logic is unchanged — it just moved from `commands::restart::run()` to `commands::daemon::restart()`.
+The assertion strings ("no platform-managed daemon found") remain the same since the daemon restart logic is unchanged — it just moved from `commands::restart::run()` to `commands::daemon::restart()`. The renames make it clear these tests target `devproxy daemon restart`, not the new app-stack `devproxy restart`.
 
 - [ ] **Step 4: Run e2e tests (non-ignored)**
 
-Run: `cargo test --test e2e -- --skip test_launchd --skip test_full_flow --skip test_self_heal --skip test_daemon_restart --skip test_up_fails_fast --skip test_daemon_writes_pid --skip test_reinit --skip test_open --skip test_version_works --skip test_init_daemon --skip test_daemon_binary 2>&1 | tail -30`
+Run: `cargo test --test e2e 2>&1 | tail -30`
 
-The skipped tests require Docker or are `#[ignore]`. The non-skipped tests (help output, version, init generates certs, restart tests) should pass.
+Tests marked `#[ignore]` (which require Docker or a running daemon) are skipped by default. The non-ignored tests (help output, version, init generates certs, daemon restart tests) should all pass.
 
 - [ ] **Step 5: Commit**
 
@@ -1227,5 +1243,5 @@ Expected: all show correct descriptions and options
 
 - [ ] **Step 4: Run non-Docker e2e tests**
 
-Run: `cargo test --test e2e test_cli_help test_cli_version test_restart_no_daemon 2>&1`
-Expected: all pass
+Run: `cargo test --test e2e 2>&1 | tail -30`
+Expected: all non-ignored tests pass (help, version, init generates certs, daemon restart tests)
