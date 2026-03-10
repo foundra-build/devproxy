@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::proxy::cert;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::time::Duration;
 
@@ -56,7 +56,10 @@ pub fn is_devproxy_process(pid: i32) -> bool {
         // On Linux, read /proc/<pid>/exe symlink.
         let exe = std::fs::read_link(format!("/proc/{pid}/exe"));
         match exe {
-            Ok(path) => path.file_name().map(|n| n == "devproxy" || n == "devproxy-daemon").unwrap_or(false),
+            Ok(path) => path
+                .file_name()
+                .map(|n| n == "devproxy" || n == "devproxy-daemon")
+                .unwrap_or(false),
             Err(_) => false,
         }
     }
@@ -328,7 +331,11 @@ pub fn install_daemon_binary(src: &std::path::Path, dest: &std::path::Path) -> R
 
     super::update::prepare_binary(dest)?;
 
-    eprintln!("{} daemon binary installed at {}", "ok:".green(), dest.display());
+    eprintln!(
+        "{} daemon binary installed at {}",
+        "ok:".green(),
+        dest.display()
+    );
     Ok(())
 }
 
@@ -360,16 +367,16 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         eprintln!("{} CA certificate generated", "ok:".green());
 
         // Trust the CA
-        eprintln!("trusting CA in system keychain (requires sudo)...");
+        eprintln!("trusting CA in login keychain...");
         match cert::trust_ca_in_system(&ca_cert_path) {
-            Ok(()) => eprintln!("{} CA trusted in system keychain", "ok:".green()),
+            Ok(()) => eprintln!("{} CA trusted in login keychain", "ok:".green()),
             Err(e) => {
                 ca_trust_needed = true;
                 eprintln!("{} could not trust CA automatically: {e}", "warn:".yellow());
-                eprintln!("  run manually with sudo:");
+                eprintln!("  run manually:");
                 #[cfg(target_os = "macos")]
                 eprintln!(
-                    "    sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+                    "    security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db {}",
                     ca_cert_path.display()
                 );
                 #[cfg(target_os = "linux")]
@@ -546,7 +553,7 @@ pub fn run(domain: &str, port: u16, no_daemon: bool) -> Result<()> {
         );
         #[cfg(target_os = "macos")]
         eprintln!(
-            "     sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+            "     security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db {}",
             ca_cert_path.display()
         );
         #[cfg(target_os = "linux")]

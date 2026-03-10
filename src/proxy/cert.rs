@@ -132,28 +132,34 @@ pub fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<tokio_rustls
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
-/// Trust the CA certificate in the system keychain.
+/// Return the path to the current user's login keychain on macOS.
+#[cfg(target_os = "macos")]
+fn login_keychain_path() -> Result<std::path::PathBuf> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join("Library/Keychains/login.keychain-db"))
+}
+
+/// Trust the CA certificate in the OS certificate store.
 ///
-/// Supports macOS (security add-trusted-cert) and Linux (update-ca-certificates).
+/// On macOS, adds to the user's login keychain (no sudo required).
+/// On Linux, copies to /usr/local/share/ca-certificates and runs update-ca-certificates.
 /// Warns on other platforms where automatic trust is not implemented.
 pub fn trust_ca_in_system(ca_cert_path: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
+        let keychain = login_keychain_path()?;
         let status = std::process::Command::new("security")
-            .args([
-                "add-trusted-cert",
-                "-d",
-                "-r",
-                "trustRoot",
-                "-k",
-                "/Library/Keychains/System.keychain",
-            ])
+            .args(["add-trusted-cert", "-r", "trustRoot", "-k"])
+            .arg(&keychain)
             .arg(ca_cert_path)
             .status()
             .context("failed to run security command")?;
 
         if !status.success() {
-            anyhow::bail!("failed to trust CA cert. You may need to run with sudo.");
+            anyhow::bail!(
+                "failed to trust CA cert in login keychain ({})",
+                keychain.display()
+            );
         }
 
         return Ok(());
@@ -204,6 +210,20 @@ mod tests {
         assert!(key_pem.contains("BEGIN PRIVATE KEY"));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn login_keychain_path_points_to_login_keychain() {
+        let path = super::login_keychain_path().unwrap();
+        assert!(path
+            .to_string_lossy()
+            .ends_with("Library/Keychains/login.keychain-db"));
+        assert!(
+            path.is_absolute(),
+            "path should be absolute: {}",
+            path.display()
+        );
+    }
+
     #[test]
     fn tls_config_loads_from_generated_certs() {
         let (ca_cert, ca_key) = generate_ca().unwrap();
@@ -217,5 +237,72 @@ mod tests {
 
         let result = load_tls_config(&cert_path, &key_path);
         assert!(result.is_ok(), "TLS config should load: {:?}", result.err());
+    }
+
+    /// Functional test: add a CA cert to the login keychain, verify it, then clean up.
+    ///
+    /// Marked `#[ignore]` because it touches the real login keychain and triggers
+    /// a macOS Keychain Access password dialog. Run manually with:
+    ///     cargo test -- cert::tests::trust_ca_login_keychain_roundtrip --ignored
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn trust_ca_login_keychain_roundtrip() {
+        use std::path::PathBuf;
+
+        /// Guard that removes the test certificate from the login keychain on drop.
+        struct KeychainCleanup {
+            cert_path: PathBuf,
+            keychain: PathBuf,
+        }
+
+        impl Drop for KeychainCleanup {
+            fn drop(&mut self) {
+                // Remove trust setting
+                let _ = std::process::Command::new("security")
+                    .args(["remove-trusted-cert", "-d"])
+                    .arg(&self.cert_path)
+                    .status();
+
+                // Remove the certificate itself
+                let _ = std::process::Command::new("security")
+                    .args(["delete-certificate", "-c", "devproxy Local CA"])
+                    .arg(&self.keychain)
+                    .status();
+            }
+        }
+
+        // Generate a fresh CA cert
+        let (ca_cert_pem, _ca_key_pem) = generate_ca().unwrap();
+
+        // Write to a temp file
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("test-ca.pem");
+        std::fs::write(&cert_path, &ca_cert_pem).unwrap();
+
+        // Resolve login keychain path
+        let home = dirs::home_dir().expect("could not determine home directory");
+        let keychain = home.join("Library/Keychains/login.keychain-db");
+
+        // Set up cleanup guard before calling trust (runs even on panic)
+        let _cleanup = KeychainCleanup {
+            cert_path: cert_path.clone(),
+            keychain: keychain.clone(),
+        };
+
+        // Trust the cert in the login keychain
+        super::trust_ca_in_system(&cert_path).unwrap();
+
+        // Verify the cert is findable in the login keychain
+        let output = std::process::Command::new("security")
+            .args(["find-certificate", "-c", "devproxy Local CA", "-a"])
+            .arg(&keychain)
+            .output()
+            .expect("failed to run security find-certificate");
+
+        assert!(
+            output.status.success(),
+            "certificate should be present in login keychain after trust_ca_in_system"
+        );
     }
 }
