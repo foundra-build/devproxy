@@ -29,7 +29,12 @@ pub async fn run() -> Result<()> {
                     .unwrap_or(3)
                     .max(3); // at least "URL".len()
 
-                println!("  {:<width$} {}", "URL".bold(), "PORT".bold(), width = url_width + 2);
+                println!(
+                    "  {:<width$} {}",
+                    "URL".bold(),
+                    "PORT".bold(),
+                    width = url_width + 2
+                );
                 for route in &routes {
                     let is_current = current_slug.as_deref() == Some(&route.slug);
                     let marker = if is_current { "* " } else { "  " };
@@ -75,7 +80,10 @@ mod tests {
             port: 51234,
         };
         let line = format_route_line(&route, Some("swift-penguin-devproxy.mysite.dev"));
-        assert!(line.starts_with("* "), "current project should have * marker: {line}");
+        assert!(
+            line.starts_with("* "),
+            "current project should have * marker: {line}"
+        );
     }
 
     #[test]
@@ -85,7 +93,10 @@ mod tests {
             port: 51235,
         };
         let line = format_route_line(&route, Some("swift-penguin-devproxy.mysite.dev"));
-        assert!(line.starts_with("  "), "non-current project should not have * marker: {line}");
+        assert!(
+            line.starts_with("  "),
+            "non-current project should not have * marker: {line}"
+        );
     }
 
     #[test]
@@ -95,6 +106,9 @@ mod tests {
             port: 51234,
         };
         let line = format_route_line(&route, None);
-        assert!(line.starts_with("  "), "no current project means no marker: {line}");
+        assert!(
+            line.starts_with("  "),
+            "no current project means no marker: {line}"
+        );
     }
 }

@@ -72,7 +72,12 @@ fn copy_fixtures(test_name: &str) -> PathBuf {
         .output()
         .expect("git init failed");
     Command::new("git")
-        .args(["remote", "add", "origin", "https://github.com/test/e2e-fixture.git"])
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/test/e2e-fixture.git",
+        ])
         .current_dir(&dest)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1291,17 +1296,16 @@ fn test_launchd_socket_activation() {
 
     // Signal-based cleanup for fallback path
     let pid_path = config_dir.join("daemon.pid");
-    if pid_path.exists() {
-        if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                unsafe {
-                    libc::kill(pid, libc::SIGTERM);
-                }
-                std::thread::sleep(Duration::from_millis(500));
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                }
-            }
+    if pid_path.exists()
+        && let Ok(pid_str) = std::fs::read_to_string(&pid_path)
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+    {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
         }
     }
 
@@ -1357,14 +1361,10 @@ fn test_version_works_with_daemon_running() {
 /// from the CLI binary path.
 #[test]
 fn test_init_daemon_binary_path_separation() {
-    let config_dir = std::env::temp_dir().join(format!(
-        "devproxy-config-path-sep-{}",
-        std::process::id()
-    ));
-    let data_dir = std::env::temp_dir().join(format!(
-        "devproxy-data-path-sep-{}",
-        std::process::id()
-    ));
+    let config_dir =
+        std::env::temp_dir().join(format!("devproxy-config-path-sep-{}", std::process::id()));
+    let data_dir =
+        std::env::temp_dir().join(format!("devproxy-data-path-sep-{}", std::process::id()));
     if config_dir.exists() {
         std::fs::remove_dir_all(&config_dir).unwrap();
     }
@@ -1378,13 +1378,7 @@ fn test_init_daemon_binary_path_separation() {
 
     // Run init with daemon (uses fallback spawn since DEVPROXY_NO_SOCKET_ACTIVATION=1)
     let output = Command::new(devproxy_bin())
-        .args([
-            "init",
-            "--domain",
-            TEST_DOMAIN,
-            "--port",
-            &port.to_string(),
-        ])
+        .args(["init", "--domain", TEST_DOMAIN, "--port", &port.to_string()])
         .env("DEVPROXY_CONFIG_DIR", &config_dir)
         .env("DEVPROXY_DATA_DIR", &data_dir)
         .env("DEVPROXY_NO_SOCKET_ACTIVATION", "1")
@@ -1394,10 +1388,7 @@ fn test_init_daemon_binary_path_separation() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     eprintln!("init stderr: {stderr}");
 
-    assert!(
-        output.status.success(),
-        "init should succeed: {stderr}"
-    );
+    assert!(output.status.success(), "init should succeed: {stderr}");
 
     // Verify daemon binary was installed at the data dir path
     let daemon_bin = data_dir.join("devproxy-daemon");
@@ -1430,17 +1421,16 @@ fn test_init_daemon_binary_path_separation() {
 
     // Clean up daemon
     let pid_path = config_dir.join("daemon.pid");
-    if pid_path.exists() {
-        if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                unsafe {
-                    libc::kill(pid, libc::SIGTERM);
-                }
-                std::thread::sleep(Duration::from_millis(500));
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                }
-            }
+    if pid_path.exists()
+        && let Ok(pid_str) = std::fs::read_to_string(&pid_path)
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+    {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
         }
     }
 
@@ -1452,10 +1442,7 @@ fn test_init_daemon_binary_path_separation() {
 /// and produce the same output as the CLI binary.
 #[test]
 fn test_daemon_binary_matches_cli_binary() {
-    let data_dir = std::env::temp_dir().join(format!(
-        "devproxy-data-match-{}",
-        std::process::id()
-    ));
+    let data_dir = std::env::temp_dir().join(format!("devproxy-data-match-{}", std::process::id()));
     if data_dir.exists() {
         std::fs::remove_dir_all(&data_dir).unwrap();
     }
