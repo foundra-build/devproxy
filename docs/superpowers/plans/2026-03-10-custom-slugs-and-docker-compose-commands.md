@@ -10,6 +10,31 @@
 
 **Spec:** `docs/superpowers/specs/2026-03-10-custom-slugs-and-docker-compose-commands-design.md`
 
+**Breaking change:** `devproxy restart` changes from daemon restart to app stack restart. Daemon restart moves to `devproxy daemon restart`. The `Daemon` CLI variant changes from a hidden top-level command to a visible subcommand group. Version bumped to 0.5.0.
+
+---
+
+## Decisions and Justifications
+
+### D1: Daemon check placement in `up.rs`
+
+The current `up.rs` checks the daemon AFTER writing override/project files and cleans up on failure. The new `up.rs` introduces a `reusing` flag. On the fresh (`!reusing`) path, daemon-not-running errors should still clean up the just-written files, matching the current behavior. On the `reusing` path, no cleanup is needed since the files pre-existed. This is implemented by checking `!reusing` in cleanup guards.
+
+### D2: E2E test updates for CLI restructuring
+
+The e2e tests have several references to the old CLI structure that must be updated:
+- `start_test_daemon()` calls `["daemon", "--port", ...]` — must become `["daemon", "run", "--port", ...]`
+- `test_restart_no_daemon` and `test_restart_running_daemon` test `devproxy restart` for daemon restart behavior — must be updated to test `devproxy daemon restart`
+- `test_help_output` asserts `daemon` is hidden from help — must be updated since `daemon` is now a visible subcommand group (only `daemon run` is hidden)
+
+### D3: `restart` e2e tests — rewrite vs. remove
+
+The two daemon restart e2e tests (`test_restart_no_daemon`, `test_restart_running_daemon`) test that `devproxy restart` reports "no platform-managed daemon found" when `DEVPROXY_NO_SOCKET_ACTIVATION=1`. After restructuring, these should test `devproxy daemon restart` instead. The behavior is identical — just the command path changes. Additionally, `devproxy restart` (now app-stack restart) will fail in these tests because there's no compose project, but that's a different error. We rewrite the tests to target `daemon restart`.
+
+### D4: Version bump rationale
+
+0.4.4 -> 0.5.0 because `devproxy restart` changes from daemon restart to app stack restart. This is a breaking behavioral change for users who have `devproxy restart` in scripts.
+
 ---
 
 ## Chunk 1: Validation + CLI Structure
@@ -17,7 +42,7 @@
 ### Task 1: Add `validate_custom_slug()` to config.rs
 
 **Files:**
-- Modify: `src/config.rs:317-328` (after `compose_slug`)
+- Modify: `src/config.rs` (after `compose_slug` function, ~line 328)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -108,7 +133,7 @@ pub fn validate_custom_slug_with_app(slug: &str, app_name: &str) -> Result<()> {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --lib config::tests::validate_custom_slug`
-Expected: all 7 tests pass
+Expected: all 7 tests pass (6 for validate_custom_slug + 1 for validate_custom_slug_with_app)
 
 - [ ] **Step 5: Commit**
 
@@ -123,97 +148,16 @@ git commit -m "feat: add validate_custom_slug() for custom slug validation"
 
 **Files:**
 - Modify: `src/cli.rs`
+- Modify: `src/main.rs`
+- Modify: `src/commands/mod.rs`
+- Modify: `src/commands/up.rs` (signature only)
+- Modify: `src/commands/daemon.rs` (add restart fn)
+- Create: `src/commands/stop.rs` (stub)
+- Create: `src/commands/start.rs` (stub)
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Replace the entire `src/cli.rs`**
 
-Replace the existing test and add new ones in `src/cli.rs`:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_up_no_slug() {
-        let cli = Cli::try_parse_from(["devproxy", "up"]).expect("should parse up");
-        match cli.command {
-            Commands::Up { slug } => assert!(slug.is_none()),
-            _ => panic!("expected Up"),
-        }
-    }
-
-    #[test]
-    fn test_parse_up_with_slug() {
-        let cli = Cli::try_parse_from(["devproxy", "up", "--slug", "dirty-panda"])
-            .expect("should parse up --slug");
-        match cli.command {
-            Commands::Up { slug } => assert_eq!(slug.as_deref(), Some("dirty-panda")),
-            _ => panic!("expected Up"),
-        }
-    }
-
-    #[test]
-    fn test_parse_stop() {
-        let cli = Cli::try_parse_from(["devproxy", "stop"]).expect("should parse stop");
-        assert!(matches!(cli.command, Commands::Stop));
-    }
-
-    #[test]
-    fn test_parse_start() {
-        let cli = Cli::try_parse_from(["devproxy", "start"]).expect("should parse start");
-        assert!(matches!(cli.command, Commands::Start));
-    }
-
-    #[test]
-    fn test_parse_restart() {
-        let cli = Cli::try_parse_from(["devproxy", "restart"]).expect("should parse restart");
-        assert!(matches!(cli.command, Commands::Restart));
-    }
-
-    #[test]
-    fn test_parse_daemon_run() {
-        let cli = Cli::try_parse_from(["devproxy", "daemon", "run"])
-            .expect("should parse daemon run");
-        match cli.command {
-            Commands::Daemon { subcommand: DaemonCommand::Run { port } } => {
-                assert_eq!(port, 443);
-            }
-            _ => panic!("expected Daemon Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_daemon_run_with_port() {
-        let cli = Cli::try_parse_from(["devproxy", "daemon", "run", "--port", "8443"])
-            .expect("should parse daemon run --port");
-        match cli.command {
-            Commands::Daemon { subcommand: DaemonCommand::Run { port } } => {
-                assert_eq!(port, 8443);
-            }
-            _ => panic!("expected Daemon Run"),
-        }
-    }
-
-    #[test]
-    fn test_parse_daemon_restart() {
-        let cli = Cli::try_parse_from(["devproxy", "daemon", "restart"])
-            .expect("should parse daemon restart");
-        match cli.command {
-            Commands::Daemon { subcommand: DaemonCommand::Restart } => {}
-            _ => panic!("expected Daemon Restart"),
-        }
-    }
-}
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `cargo test --lib cli::tests 2>&1 | head -20`
-Expected: compilation errors
-
-- [ ] **Step 3: Write the implementation**
-
-Replace the entire `src/cli.rs` content:
+The existing `cli.rs` has a flat `Commands` enum with `Daemon { port }` as a hidden variant and `Restart` as a daemon-restart command. Replace with:
 
 ```rust
 use clap::{Parser, Subcommand};
@@ -364,7 +308,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 4: Update main.rs dispatch**
+- [ ] **Step 2: Update main.rs dispatch**
 
 Replace the match block in `src/main.rs`:
 
@@ -392,9 +336,9 @@ match cli.command {
 }
 ```
 
-- [ ] **Step 5: Update commands/mod.rs**
+- [ ] **Step 3: Update commands/mod.rs**
 
-Add the new modules:
+Add the new modules (keep alphabetical order):
 
 ```rust
 pub mod daemon;
@@ -411,7 +355,7 @@ pub mod up;
 pub mod update;
 ```
 
-- [ ] **Step 6: Create stub command files so it compiles**
+- [ ] **Step 4: Create stub command files so it compiles**
 
 Create `src/commands/stop.rs`:
 ```rust
@@ -431,13 +375,13 @@ pub fn run() -> Result<()> {
 }
 ```
 
-- [ ] **Step 7: Update up.rs signature**
+- [ ] **Step 5: Update up.rs signature**
 
 Change the signature in `src/commands/up.rs` from `pub fn run() -> Result<()>` to `pub fn run(_slug: Option<&str>) -> Result<()>`. The `_slug` parameter is unused for now.
 
-- [ ] **Step 8: Add daemon restart function**
+- [ ] **Step 6: Add daemon restart function**
 
-Add to `src/commands/daemon.rs`:
+Add to `src/commands/daemon.rs` (after the existing `run` function):
 
 ```rust
 pub fn restart() -> anyhow::Result<()> {
@@ -460,7 +404,9 @@ pub fn restart() -> anyhow::Result<()> {
 }
 ```
 
-- [ ] **Step 9: Run tests to verify they pass**
+**Note:** This is the same logic that currently lives in `src/commands/restart.rs`. It moves to `daemon.rs` because it handles the daemon lifecycle, not the app stack.
+
+- [ ] **Step 7: Run tests to verify compilation and unit tests pass**
 
 Run: `cargo test --lib cli::tests`
 Expected: all 8 tests pass
@@ -468,7 +414,7 @@ Expected: all 8 tests pass
 Run: `cargo test --lib config::tests`
 Expected: all existing + new tests pass
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/cli.rs src/main.rs src/commands/mod.rs src/commands/stop.rs src/commands/start.rs src/commands/up.rs src/commands/daemon.rs
@@ -561,9 +507,15 @@ pub fn run(custom_slug: Option<&str>) -> Result<()> {
         slug
     };
 
-    // Verify daemon is running
+    // Verify daemon is running.
+    // On the !reusing path, clean up freshly-written files on failure.
+    // On the reusing path, files pre-existed so leave them alone.
     let socket_path = Config::socket_path()?;
     if !socket_path.exists() {
+        if !reusing {
+            let _ = std::fs::remove_file(&override_path);
+            let _ = std::fs::remove_file(&project_path);
+        }
         bail!(
             "daemon is not running (no socket at {}). Run `devproxy init` first.",
             socket_path.display()
@@ -571,6 +523,10 @@ pub fn run(custom_slug: Option<&str>) -> Result<()> {
     }
 
     if !crate::ipc::ping_sync(&socket_path, std::time::Duration::from_secs(2)) {
+        if !reusing {
+            let _ = std::fs::remove_file(&override_path);
+            let _ = std::fs::remove_file(&project_path);
+        }
         bail!(
             "daemon is not running (no response from {}). Run `devproxy init` first.",
             socket_path.display()
@@ -616,7 +572,11 @@ pub fn run(custom_slug: Option<&str>) -> Result<()> {
 }
 ```
 
-**Note on cleanup logic change:** The `reusing` boolean is captured before any file writes. On `docker compose up` failure, we only clean up files we freshly created (`!reusing`), not files that existed beforehand. For daemon-not-running errors, we bail without cleanup since the files may be intentionally there from a previous `stop`.
+**Key behavioral changes from current `up.rs`:**
+
+1. **Slug reuse:** When `.devproxy-project` and `.devproxy-override.yml` both exist, the existing slug and port binding are reused. `--slug` is ignored with a warning.
+2. **Custom slug support:** When files don't exist, `--slug` replaces the random slug prefix. Validation runs before any side effects.
+3. **Cleanup guards:** On the `!reusing` path, freshly-written files are cleaned up on daemon-not-running or docker-compose-up failures. On the `reusing` path, files are left intact (they pre-existed, possibly from a `devproxy stop`).
 
 - [ ] **Step 2: Run clippy and tests**
 
@@ -958,17 +918,120 @@ git commit -m "feat: update plist/unit templates for daemon run subcommand"
 
 ---
 
-## Chunk 4: Documentation + Plugin Sync
+## Chunk 4: E2E Test Updates
 
-### Task 8: Update README.md
+### Task 8: Update e2e tests for CLI restructuring
+
+**Files:**
+- Modify: `tests/e2e.rs`
+
+The CLI restructuring changes three things that affect e2e tests:
+
+1. `devproxy daemon --port N` becomes `devproxy daemon run --port N`
+2. `devproxy restart` (daemon restart) becomes `devproxy daemon restart`
+3. `daemon` is now visible in `--help` (as a subcommand group with only `restart` visible)
+
+- [ ] **Step 1: Update `start_test_daemon()` helper**
+
+In `tests/e2e.rs`, find the `start_test_daemon` function (~line 153-155). Change:
+
+```rust
+.args(["daemon", "--port", &port.to_string()])
+```
+To:
+```rust
+.args(["daemon", "run", "--port", &port.to_string()])
+```
+
+- [ ] **Step 2: Update `test_help_output`**
+
+In `test_help_output` (~line 228-247):
+
+1. The assertion for `restart` (line 229) is still valid — `restart` is a visible command.
+2. Add assertions for `stop`, `start`, and `daemon`:
+```rust
+assert!(
+    stdout.contains("stop"),
+    "help should list the stop command"
+);
+assert!(
+    stdout.contains("start"),
+    "help should list the start command"
+);
+assert!(
+    stdout.contains("daemon"),
+    "help should list the daemon subcommand group"
+);
+```
+3. Remove the assertion that `daemon` is hidden (~lines 240-247):
+```rust
+// DELETE these lines — daemon is now a visible subcommand group:
+// assert!(
+//     !stdout
+//         .lines()
+//         .any(|l| l.trim_start().starts_with("daemon ")),
+//     "daemon command should be hidden from help"
+// );
+```
+
+- [ ] **Step 3: Update daemon restart e2e tests**
+
+In `test_restart_no_daemon` (~line 351-381), change:
+```rust
+.args(["restart"])
+```
+To:
+```rust
+.args(["daemon", "restart"])
+```
+
+In `test_restart_running_daemon` (~line 383-408), change:
+```rust
+.args(["restart"])
+```
+To:
+```rust
+.args(["daemon", "restart"])
+```
+
+The assertion strings ("no platform-managed daemon found") remain the same since the daemon restart logic is unchanged — it just moved from `commands::restart::run()` to `commands::daemon::restart()`.
+
+- [ ] **Step 4: Run e2e tests (non-ignored)**
+
+Run: `cargo test --test e2e -- --skip test_launchd --skip test_full_flow --skip test_self_heal --skip test_daemon_restart --skip test_up_fails_fast --skip test_daemon_writes_pid --skip test_reinit --skip test_open --skip test_version_works --skip test_init_daemon --skip test_daemon_binary 2>&1 | tail -30`
+
+The skipped tests require Docker or are `#[ignore]`. The non-skipped tests (help output, version, init generates certs, restart tests) should pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/e2e.rs
+git commit -m "test: update e2e tests for daemon run subcommand and CLI restructuring
+
+- start_test_daemon now uses 'daemon run --port'
+- daemon restart tests use 'daemon restart' instead of 'restart'
+- help output test updated for visible daemon subcommand group"
+```
+
+---
+
+## Chunk 5: Documentation + Plugin Sync
+
+### Task 9: Update README.md
 
 **Files:**
 - Modify: `README.md`
 
 - [ ] **Step 1: Update the example and commands table**
 
-Update the example at the top to show `--slug`:
+Update the code example at the top (~line 14-17) to show the composite slug format and `--slug`:
 
+Change:
+```bash
+devproxy up
+# → https://swift-penguin.mysite.dev
+```
+To:
 ```bash
 devproxy up
 # → https://swift-penguin-myapp.mysite.dev
@@ -977,7 +1040,7 @@ devproxy up --slug my-app
 # → https://my-app-myapp.mysite.dev
 ```
 
-Update the commands table:
+Update the commands table (~lines 52-62):
 
 ```markdown
 | Command              | Description                                       |
@@ -1006,14 +1069,18 @@ git commit -m "docs: update README with stop/start/restart and --slug flag"
 
 ---
 
-### Task 9: Update skills/devproxy/SKILL.md
+### Task 10: Update skills/devproxy/SKILL.md
 
 **Files:**
 - Modify: `skills/devproxy/SKILL.md`
 
-- [ ] **Step 1: Update the command table and descriptions**
+- [ ] **Step 1: Update the trigger description in the frontmatter**
 
-Update the commands table to add new commands and update `restart`:
+Add `"devproxy stop"`, `"devproxy start"`, `"devproxy daemon restart"` to the description field.
+
+- [ ] **Step 2: Update the commands table**
+
+Replace the commands table with:
 
 ```markdown
 | Command                          | What it does                                    |
@@ -1035,19 +1102,20 @@ Update the commands table to add new commands and update `restart`:
 | `devproxy status`                | Daemon health + active route count              |
 ```
 
-Update the "Daemon Lifecycle" section to change `devproxy restart` reference to `devproxy daemon restart`.
+- [ ] **Step 3: Update the "Daemon Lifecycle" section**
 
-Update the "Common Issues" table — change the "Slug changed after restart" row:
+Change `devproxy restart` to `devproxy daemon restart` in the bullet point about restarting.
+
+- [ ] **Step 4: Update the "Common Issues" table**
+
+Change the "Slug changed after restart" row:
 ```markdown
 | Slug changed after restart | Use `devproxy stop`/`start` to preserve slug, or `devproxy up --slug NAME` for a predictable slug |
 ```
 
-Update the trigger description in the frontmatter to include the new commands:
-```
-"devproxy stop", "devproxy start", "devproxy daemon restart"
-```
+Also update the "Connection refused" row to reference `devproxy daemon restart` instead of `devproxy restart`.
 
-- [ ] **Step 2: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add skills/devproxy/SKILL.md
@@ -1056,7 +1124,61 @@ git commit -m "docs: update devproxy skill with new commands and --slug"
 
 ---
 
-### Task 10: Bump version in Cargo.toml and plugin.json
+### Task 11: Update skills/setup/SKILL.md
+
+**Files:**
+- Modify: `skills/setup/SKILL.md`
+
+- [ ] **Step 1: Update daemon restart reference**
+
+In Step 7 (~line 182), change:
+```markdown
+- Use `devproxy restart` to restart the daemon if needed
+```
+To:
+```markdown
+- Use `devproxy daemon restart` to restart the daemon if needed
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add skills/setup/SKILL.md
+git commit -m "docs: update setup skill for daemon restart command change"
+```
+
+---
+
+### Task 12: Update docs/spec.md — resolve slug persistence open question
+
+**Files:**
+- Modify: `docs/spec.md`
+
+- [ ] **Step 1: Mark slug persistence as resolved**
+
+Find the "Slug persistence" bullet in the "Open questions / future work" section (~line 199-201) and replace:
+```markdown
+- **Slug persistence**: slugs are stable for the lifetime of a running container but reset on
+  `devproxy up`. Could offer `devproxy pin <slug>` to write the slug into a `.devproxy` file
+  so the same slug is always used for a given project.
+```
+With:
+```markdown
+- ~~**Slug persistence**: slugs are stable for the lifetime of a running container but reset on
+  `devproxy up`. Could offer `devproxy pin <slug>` to write the slug into a `.devproxy` file
+  so the same slug is always used for a given project.~~ **Done** — `devproxy up --slug NAME` allows predictable slugs. `devproxy stop`/`start` preserves the slug across stop/start cycles without regenerating.
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add docs/spec.md
+git commit -m "docs: mark slug persistence open question as resolved"
+```
+
+---
+
+### Task 13: Bump version in Cargo.toml and plugin.json
 
 **Files:**
 - Modify: `Cargo.toml`
@@ -1077,7 +1199,9 @@ git commit -m "chore: bump version to 0.5.0 for breaking restart change"
 
 ---
 
-### Task 11: Final verification
+## Chunk 6: Final Verification
+
+### Task 14: Final verification
 
 - [ ] **Step 1: Run full test suite**
 
@@ -1097,3 +1221,8 @@ Run: `cargo run -- up --help 2>&1`
 Run: `cargo run -- daemon --help 2>&1`
 Run: `cargo run -- daemon restart --help 2>&1`
 Expected: all show correct descriptions and options
+
+- [ ] **Step 4: Run non-Docker e2e tests**
+
+Run: `cargo test --test e2e test_cli_help_output test_cli_version test_restart_no_daemon 2>&1`
+Expected: all pass
