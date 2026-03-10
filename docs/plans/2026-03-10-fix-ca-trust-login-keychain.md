@@ -35,6 +35,8 @@ Key differences from the current code:
 
 **Why `login.keychain-db`:** Modern macOS (10.12+) uses the `-db` suffix. The `security` command accepts both `login.keychain` and `login.keychain-db`, but using the actual filename is more robust. We resolve the full path via `$HOME/Library/Keychains/login.keychain-db`.
 
+**User experience note:** `security add-trusted-cert` targeting the login keychain will trigger a macOS Keychain Access password dialog asking the user to confirm trusting the certificate. This is a one-time interactive prompt (not sudo) and is the same behavior as mkcert. The `security` command exits with status 0 after the user approves or non-zero if they cancel.
+
 **Why keep the function name `trust_ca_in_system`:** On Linux, this function still targets system-level CA trust (`/usr/local/share/ca-certificates`). Renaming would touch more code for no functional benefit. The doc comment will be updated to describe the per-platform behavior accurately.
 
 ## Scope of User-Facing Message Changes in init.rs
@@ -65,7 +67,7 @@ Add to the existing `#[cfg(test)] mod tests` block at the end of `src/proxy/cert
 fn login_keychain_path_points_to_login_keychain() {
     let path = super::login_keychain_path().unwrap();
     assert!(path.to_string_lossy().ends_with("Library/Keychains/login.keychain-db"));
-    assert!(path.to_string_lossy().starts_with("/Users/"));
+    assert!(path.is_absolute(), "path should be absolute: {}", path.display());
 }
 ```
 
