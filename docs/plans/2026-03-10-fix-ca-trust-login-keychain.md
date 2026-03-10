@@ -4,7 +4,7 @@
 
 **Goal:** Make devproxy's CA certificate trusted by all TLS clients (curl, reqwest/native-tls, browsers) on macOS without requiring sudo, by adding it to the login keychain instead of the system keychain.
 
-**Architecture:** The fix is entirely within `src/proxy/cert.rs` (the `trust_ca_in_system` function) and `src/commands/init.rs` (user-facing messages). No new commands, no new dependencies.
+**Architecture:** The fix is entirely within `src/proxy/cert.rs` (the `trust_ca_in_system` function) and `src/commands/init.rs` (user-facing messages). No new commands, no new dependencies. The `dirs` crate is already in `Cargo.toml`.
 
 **Tech Stack:** Rust, macOS `security` CLI tool
 
@@ -35,27 +35,29 @@ Key differences from the current code:
 
 **Why `login.keychain-db`:** Modern macOS (10.12+) uses the `-db` suffix. The `security` command accepts both `login.keychain` and `login.keychain-db`, but using the actual filename is more robust. We resolve the full path via `$HOME/Library/Keychains/login.keychain-db`.
 
-## Scope of User-Facing Message Changes
+**Why keep the function name `trust_ca_in_system`:** On Linux, this function still targets system-level CA trust (`/usr/local/share/ca-certificates`). Renaming to something like `trust_ca` is tempting but would touch more code for no functional benefit. The doc comment already describes per-platform behavior. Keep the name as-is.
 
-The `init.rs` file has three places that reference the system keychain:
+## Scope of User-Facing Message Changes in init.rs
+
+There are **five** places in `src/commands/init.rs` that reference the system keychain or sudo for macOS trust:
 1. Line 363: `"trusting CA in system keychain (requires sudo)..."` — change to `"trusting CA in login keychain..."`
-2. Line 372: fallback manual command with `sudo security add-trusted-cert ... /Library/Keychains/System.keychain` — update to new command (no sudo)
-3. Line 549: "Next steps" fallback with same manual command — update to new command (no sudo)
+2. Line 365: `"CA trusted in system keychain"` — change to `"CA trusted in login keychain"`
+3. Line 369: `"run manually with sudo:"` — change to platform-conditional message (macOS no longer needs sudo; Linux still does)
+4. Line 372: fallback manual command with `sudo security add-trusted-cert ... /Library/Keychains/System.keychain` — update to new command (no sudo)
+5. Line 548-549: "Next steps" fallback with same manual command — update to new command (no sudo)
 
-All three must be updated consistently.
+All five must be updated consistently.
 
 ---
 
-### Task 1: Change macOS trust to use login keychain in cert.rs
+### Task 1: Add `login_keychain_path` helper and test in cert.rs
 
 **Files:**
 - Modify: `src/proxy/cert.rs`
 
-**Step 1: Write a unit test that validates the security command arguments**
+**Step 1: Add the helper function**
 
-The actual `security add-trusted-cert` call is a side-effecting system command and cannot be tested in CI. However, we can extract the logic that builds the keychain path and test that. Add a helper function `login_keychain_path()` and a test for it.
-
-Add to `src/proxy/cert.rs`:
+Add just above the existing `trust_ca_in_system` function (before line 135):
 
 ```rust
 /// Return the path to the current user's login keychain on macOS.
@@ -66,7 +68,9 @@ fn login_keychain_path() -> Result<std::path::PathBuf> {
 }
 ```
 
-Add test in the existing `#[cfg(test)] mod tests`:
+**Step 2: Add a unit test**
+
+Add to the existing `#[cfg(test)] mod tests` block at the end of the file:
 
 ```rust
 #[cfg(target_os = "macos")]
@@ -78,9 +82,31 @@ fn login_keychain_path_points_to_login_keychain() {
 }
 ```
 
-**Step 2: Update trust_ca_in_system to use login keychain**
+**Step 3: Run the test**
 
-Replace the macOS block in `trust_ca_in_system` (lines 140-160) with:
+```bash
+cargo test --lib -- cert::tests::login_keychain_path
+```
+
+Expected: PASS (on macOS).
+
+**Step 4: Commit**
+
+```bash
+git add src/proxy/cert.rs
+git commit -m "feat: add login_keychain_path helper for macOS CA trust"
+```
+
+---
+
+### Task 2: Update `trust_ca_in_system` to use login keychain
+
+**Files:**
+- Modify: `src/proxy/cert.rs`
+
+**Step 1: Replace the macOS block in trust_ca_in_system**
+
+Replace lines 140-160 (the `#[cfg(target_os = "macos")]` block inside `trust_ca_in_system`) with:
 
 ```rust
 #[cfg(target_os = "macos")]
@@ -109,22 +135,29 @@ Replace the macOS block in `trust_ca_in_system` (lines 140-160) with:
 }
 ```
 
-Key changes from current code:
+Changes from current code:
 - Removed `-d` flag (no admin trust domain)
 - Changed keychain from `/Library/Keychains/System.keychain` to dynamic login keychain path
-- Updated error message (no more "may need sudo" since login keychain doesn't need it)
+- Updated error message (no more "may need sudo")
 
-**Step 3: Verify compilation and tests**
+**Step 2: Verify compilation and existing tests still pass**
 
 ```bash
 cargo test --lib -- cert::tests
 ```
 
-Expected: all cert tests pass, including the new `login_keychain_path_points_to_login_keychain` test.
+Expected: all cert tests pass.
+
+**Step 3: Commit**
+
+```bash
+git add src/proxy/cert.rs
+git commit -m "fix: use login keychain for macOS CA trust (no sudo required)"
+```
 
 ---
 
-### Task 2: Update user-facing messages in init.rs
+### Task 3: Update user-facing messages in init.rs
 
 **Files:**
 - Modify: `src/commands/init.rs`
@@ -140,10 +173,35 @@ To:
 eprintln!("trusting CA in login keychain...");
 ```
 
-**Step 2: Update the fallback manual command (line 370-374)**
+**Step 2: Update the success message (line 365)**
 
-Change the `#[cfg(target_os = "macos")]` fallback instructions from:
+Change:
 ```rust
+Ok(()) => eprintln!("{} CA trusted in system keychain", "ok:".green()),
+```
+To:
+```rust
+Ok(()) => eprintln!("{} CA trusted in login keychain", "ok:".green()),
+```
+
+**Step 3: Update the fallback "run manually" text (line 369)**
+
+Change:
+```rust
+eprintln!("  run manually with sudo:");
+```
+To:
+```rust
+eprintln!("  run manually:");
+```
+
+Note: On Linux the fallback command still uses `sudo`, but the "run manually:" text itself doesn't need to say "with sudo" since the individual commands below show `sudo` where needed.
+
+**Step 4: Update the fallback manual command (lines 370-374)**
+
+Change:
+```rust
+#[cfg(target_os = "macos")]
 eprintln!(
     "    sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
     ca_cert_path.display()
@@ -151,16 +209,18 @@ eprintln!(
 ```
 To:
 ```rust
+#[cfg(target_os = "macos")]
 eprintln!(
     "    security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db {}",
     ca_cert_path.display()
 );
 ```
 
-**Step 3: Update the "Next steps" fallback (line 547-550)**
+**Step 5: Update the "Next steps" fallback (lines 547-550)**
 
-Change the `#[cfg(target_os = "macos")]` next-steps instructions from:
+Change:
 ```rust
+#[cfg(target_os = "macos")]
 eprintln!(
     "     sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
     ca_cert_path.display()
@@ -168,13 +228,14 @@ eprintln!(
 ```
 To:
 ```rust
+#[cfg(target_os = "macos")]
 eprintln!(
     "     security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db {}",
     ca_cert_path.display()
 );
 ```
 
-**Step 4: Verify compilation**
+**Step 6: Verify compilation**
 
 ```bash
 cargo clippy --all-targets -- -D warnings
@@ -182,9 +243,16 @@ cargo clippy --all-targets -- -D warnings
 
 Expected: clean build, no warnings.
 
+**Step 7: Commit**
+
+```bash
+git add src/commands/init.rs
+git commit -m "fix: update init messages to reflect login keychain trust (no sudo)"
+```
+
 ---
 
-### Task 3: Run full test suite and verify
+### Task 4: Run full test suite and verify
 
 **Files:** (no modifications)
 
